@@ -7,6 +7,7 @@ import {
   createMachine,
   enqueueActions,
   fromPromise,
+  setup,
 } from 'xstate';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -6026,6 +6027,264 @@ describe('DR-032 resolved-player concurrency', () => {
         }),
       ]),
     );
+    await runtime.dispose();
+  });
+});
+
+// W-23 shape 1: a compiled machine types a semantic field as a list. Its own
+// validator admits only a list of intent numbers, while the runtime once
+// admitted only strings, so a judge that answered with the list was told to
+// answer with a string, which the machine then refused after the commit had
+// landed (DR-089).
+const SPRINT_PLAN_COMMITTED =
+  'Analyst 把全部意图记录写入 specs/intents/ 并提交为一个新提交；规程就此结束，' +
+  '向产品经理返回该提交和按依赖顺序排列的意图编号列表。' +
+  'Output shall include `latestCommit: <commit identity>` and ' +
+  '`intentNumbers: <按依赖顺序排列的意图编号列表>`.';
+
+const isIntentNumberList = (value: unknown): boolean =>
+  Array.isArray(value) &&
+  value.every(
+    (entry) =>
+      (typeof entry === 'string' && entry.trim().length > 0) ||
+      (typeof entry === 'number' && Number.isFinite(entry)),
+  );
+
+const committedOutput = (
+  event: unknown,
+): { latestCommit: string; intentNumbers: readonly (string | number)[] } | undefined => {
+  const output = (event as { output?: Record<string, unknown> }).output;
+  return output?.guard === 'committed' &&
+    typeof output.latestCommit === 'string' &&
+    output.latestCommit.trim().length > 0 &&
+    isIntentNumberList(output.intentNumbers)
+    ? (output as {
+        latestCommit: string;
+        intentNumbers: readonly (string | number)[];
+      })
+    : undefined;
+};
+
+const intentNumberListMachine = setup({
+  types: {
+    context: {} as {
+      task: string;
+      latestCommit?: string;
+      intentNumbers?: readonly (string | number)[];
+      lastError?: { name: string; message: string };
+    },
+  },
+  actions: {
+    [ACCEPTED_OUTCOME_ACTION_TYPE]: () => undefined,
+  },
+  guards: {
+    committed: ({ event }) => committedOutput(event) !== undefined,
+  },
+}).createMachine({
+  id: 'sprint-plan-shape',
+  context: { task: '' },
+  initial: 'ready',
+  states: {
+    ready: {
+      meta: stateMeta('ready', 'Waiting for an epic.'),
+      tags: ['playbook.parked'],
+      on: {
+        START: {
+          target: 'finalRevision',
+          actions: assign({
+            task: ({ event }) => (event as { task: string }).task,
+          }),
+        },
+      },
+    },
+    finalRevision: {
+      meta: roleMeta(
+        'finalRevision',
+        'analyst',
+        'Analyst writes and commits the intent records.',
+      ),
+      tags: ['playbook.busy'],
+      invoke: {
+        src: 'player',
+        input: ({ context }) => ({
+          stateId: 'finalRevision',
+          role: 'analyst',
+          sourceItem: 'SPRINT-PLAN-5',
+          prompt: `Write and commit the intent records for ${context.task}.`,
+          result: { committed: SPRINT_PLAN_COMMITTED },
+        }),
+        onDone: [
+          {
+            guard: 'committed',
+            target: 'done',
+            actions: [
+              {
+                type: ACCEPTED_OUTCOME_ACTION_TYPE,
+                params: {
+                  source: 'finalRevision',
+                  target: 'done',
+                  acceptedOutcome: 'committed',
+                },
+              },
+              assign(({ event }) => {
+                const output = committedOutput(event)!;
+                return {
+                  latestCommit: output.latestCommit,
+                  intentNumbers: output.intentNumbers,
+                };
+              }),
+            ],
+          },
+          {
+            target: 'failed',
+            actions: assign({
+              lastError: () => ({
+                name: 'MalformedActorOutput',
+                message:
+                  'The acting player returned an unrecognized or incomplete result.',
+              }),
+            }),
+          },
+        ],
+        onError: 'failed',
+      },
+    },
+    done: {
+      meta: stateMeta('done', 'The intent records are committed.'),
+      tags: ['playbook.parked'],
+    },
+    failed: {
+      meta: stateMeta('failed', 'A malformed result interrupted the plan.'),
+      tags: ['playbook.parked'],
+    },
+  },
+});
+
+function intentNumberListSchema3Spec(): XStatePlaybookRuntimeSpecV3<EmptyOptions> {
+  return repeatSchema3Spec({
+    label: 'SPRINT-PLAN',
+    roleStates: {
+      finalRevision: {
+        role: 'analyst',
+        label: 'Analyst writes and commits the intent records.',
+      },
+    },
+    outcomeAuthority: {
+      governedPlayerStates: {
+        finalRevision: {
+          committed: {
+            fields: { latestCommit: 'effect', intentNumbers: 'semantic' },
+            repositoryDisposition: 'one-descendant-commit',
+          },
+        },
+      },
+    },
+  });
+}
+
+const ANALYST_REPORT = [
+  '四个文件已与审查通过的正文逐字节核对一致，`spex lint` 检查通过。',
+  '已在当前分支 `main` 创建新提交：`90efc1af462f9328d6101daba0397c3fe5a45676`。',
+  '',
+  '意图编号顺序：`IR-001 → IR-002 → IR-003 → IR-004`。',
+].join('\n');
+
+describe('DR-089 semantic fields take the shape the machine admits', () => {
+  it('accepts the list a list-typed machine admits on the first judge reply (W-23 trace)', async () => {
+    const hostCapabilities = emptyLedgerHostCapabilities({
+      classifications: ['one-descendant-commit'],
+    });
+    const callPlayer = vi.fn<PlaybookPorts['callPlayer']>(async () => ({
+      status: 'ok',
+      finalText: ANALYST_REPORT,
+    }));
+    // The trace's two judge replies: the list first, then the string the
+    // runtime's string-only rule asked for.
+    const callJudge = vi
+      .fn<PlaybookPorts['callJudge']>()
+      .mockResolvedValueOnce(
+        '{"guard":"committed","intentNumbers":["IR-001","IR-002","IR-003","IR-004"]}',
+      )
+      .mockResolvedValueOnce(
+        '{"guard":"committed","intentNumbers":"IR-001 → IR-002 → IR-003 → IR-004"}',
+      );
+    const runtime = createXStatePlaybookRuntime<EmptyOptions, object>(
+      intentNumberListMachine,
+      intentNumberListSchema3Spec(),
+    )({ configuredOptions: {}, hostCapabilities });
+    await runtime.init(session({ ...recordingPorts(callPlayer), callJudge }));
+
+    await expect(
+      runtime.handleBossInput(bossTurn('the quiz epic')),
+    ).resolves.toMatchObject({ state: { stateId: 'done' } });
+
+    expect(callJudge).toHaveBeenCalledOnce();
+    expect(callJudge.mock.calls[0]![0]).toContain(
+      '  Reply exactly: { "guard": "committed", "intentNumbers": <按依赖顺序排列的意图编号列表> }\n' +
+        '  JSON value shape: `intentNumbers` is a JSON array of strings or numbers',
+    );
+    const boundary = hostCapabilities.effectLedger.snapshot().boundaries[0];
+    expect(boundary).toMatchObject({
+      semanticCandidate: {
+        guard: 'committed',
+        intentNumbers: ['IR-001', 'IR-002', 'IR-003', 'IR-004'],
+      },
+      correctionBudget: { limit: 1, spent: false },
+    });
+    expect(runtime.exportSnapshot?.()?.machine).toMatchObject({
+      context: {
+        latestCommit: boundary?.physicalReceipt?.commitOid,
+        intentNumbers: ['IR-001', 'IR-002', 'IR-003', 'IR-004'],
+      },
+    });
+    expect(boundary?.physicalReceipt?.commitOid).toMatch(/^[0-9a-f]{40}$/);
+    await runtime.dispose();
+  });
+
+  it('names the admitted shape when the judge answers with a string', async () => {
+    const hostCapabilities = emptyLedgerHostCapabilities({
+      classifications: ['one-descendant-commit'],
+    });
+    const callPlayer = vi.fn<PlaybookPorts['callPlayer']>(async () => ({
+      status: 'ok',
+      finalText: ANALYST_REPORT,
+    }));
+    const callJudge = vi
+      .fn<PlaybookPorts['callJudge']>()
+      .mockResolvedValueOnce(
+        '{"guard":"committed","intentNumbers":"IR-001 → IR-002 → IR-003 → IR-004"}',
+      )
+      .mockResolvedValueOnce(
+        '{"guard":"committed","intentNumbers":["IR-001","IR-002","IR-003","IR-004"]}',
+      );
+    const runtime = createXStatePlaybookRuntime<EmptyOptions, object>(
+      intentNumberListMachine,
+      intentNumberListSchema3Spec(),
+    )({ configuredOptions: {}, hostCapabilities });
+    await runtime.init(session({ ...recordingPorts(callPlayer), callJudge }));
+
+    await expect(
+      runtime.handleBossInput(bossTurn('the quiz epic')),
+    ).resolves.toMatchObject({ state: { stateId: 'done' } });
+
+    expect(callJudge).toHaveBeenCalledTimes(2);
+    expect(callJudge.mock.calls[1]![0]).toContain(
+      'Validation error: semantic candidate field "intentNumbers" must be a JSON array of strings or numbers',
+    );
+    expect(callJudge.mock.calls[1]![0]).toContain(
+      '  JSON value shape: `intentNumbers` is a JSON array of strings or numbers',
+    );
+    expect(hostCapabilities.effectLedger.snapshot().boundaries[0]).toMatchObject({
+      semanticCandidate: {
+        guard: 'committed',
+        intentNumbers: ['IR-001', 'IR-002', 'IR-003', 'IR-004'],
+      },
+      initialSemanticCandidate: {
+        guard: 'committed',
+        intentNumbers: 'IR-001 → IR-002 → IR-003 → IR-004',
+      },
+      correctionBudget: { limit: 1, spent: true },
+    });
     await runtime.dispose();
   });
 });

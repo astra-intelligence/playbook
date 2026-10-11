@@ -10,6 +10,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `@sublang/playbook/xstate-runtime` exports `inferSemanticValueShapes`,
+  `describePlaybookSemanticValueShape`, and the `PlaybookSemanticValueShape`
+  and `PlaybookSemanticValueShapes` types, and
+  `reconcilePlaybookSemanticEvidence` and `renderGovernedOutcomeContract`
+  take optional semantic value shapes, so linked machinery of an
+  artifact's own reads, renders and enforces the shapes the engine does
+  ([[playbook-runtime-34](specs/packages/playbook-runtime.md#playbook-runtime-34)],
+  [[playbook-runtime-48](specs/packages/playbook-runtime.md#playbook-runtime-48)]).
+
+### Fixed
+
+- **A judge is no longer asked for a shape the compiled machine refuses.**
+  The runtime admitted only string semantic fields, so a machine that typed
+  a field as a list of intent numbers refused the string the judge was
+  forced into and failed a step whose commit had already landed. The
+  shared factory now reads, at construction, the JSON value shape the
+  machine's own validator admits for each semantic field; the judge prompt
+  names every non-string shape, the reconciler enforces it, and its
+  validation error names it for the one correction. Fields the machine
+  admits as strings keep their contract
+  ([DR-089](specs/decisions/089-judge-replies-take-the-machines-shapes.md),
+  [[playbook-runtime-48](specs/packages/playbook-runtime.md#playbook-runtime-48)],
+  [[playbook-runtime-77](specs/packages/playbook-runtime.md#playbook-runtime-77)]).
+- **A direct-Captain judge reply with an extra field no longer escapes as an
+  uncaught error.** The adjudication prompt states each outcome's exact
+  reply, a structurally invalid reply earns one corrective adjudication
+  naming its error, and a second one parks the step in its failure state
+  with a `judge-failed` cause and its ordinary controls
+  ([[playbook-runtime-49](specs/packages/playbook-runtime.md#playbook-runtime-49)]).
+- **A failed turn's reply states the commits it made.** When a turn settles
+  with its leaf parked in failure, the Playbook Captain shell reports every
+  commit the turn's receipts proved beside the failure report and gives the
+  closing-reply prompt the same facts, so the reply cannot say nothing was
+  written ([[playbook-captain-85](specs/packages/playbook-captain.md#playbook-captain-85)]).
+
 ## [17.7.0] - 2026-10-11
 
 ### Added

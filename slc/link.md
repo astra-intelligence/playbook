@@ -1286,6 +1286,12 @@ runtime-owned payload field; `guard` shall name exactly one outcome declared
 by both the live result map and `outcomeAuthority`; and every semantic-owned
 field shall satisfy the result map's required-field type before any actor
 output is delivered.
+That type is the value shape the compiled FSM's own validator admits for the
+field: the shared engine reads it once at construction by presenting each
+governed outcome's accepting arm with sample values of a closed set of shapes,
+a field whose shape the FSM admits as a string or does not reveal stays a
+string, and the judge prompt and validation error name every non-string shape
+([DR-089](../specs/decisions/089-judge-replies-take-the-machines-shapes.md)).
 The judge prompt shall render each governed outcome's description with its
 meaning verbatim and its `Output shall include` clause replaced by that reply
 contract — exactly `guard` plus the semantic-owned fields, each keeping its
@@ -1373,10 +1379,16 @@ player or judge call.
 The adjudicator shall use the same document-order tolerant JSON recovery as
 the Boss classifier. Unlike invalid classification, a reply from which no
 object can be recovered, an undeclared guard, or a missing required field is a
-control-plane error for nongoverned delegated-player and direct-Captain adjudication and
+control-plane error for nongoverned delegated-player adjudication and
 shall throw after the invocation reaches its FSM error path and ordered
 emissions drain; schema-3 governed adjudication follows the bounded
 reconciliation contract above instead.
+Direct-Captain adjudication treats such a reply, or one carrying an undeclared
+field, as a structural error: it makes exactly one corrective adjudication over
+the same visible output that restates the reply and its validation error, and
+a second structural error routes the invocation to its FSM failure state as a
+recoverable `judge-failed` failure rather than a control-plane error
+([DR-089](../specs/decisions/089-judge-replies-take-the-machines-shapes.md)).
 
 Two default adjudication strategies, in selection order:
 
@@ -1389,7 +1401,11 @@ Two default adjudication strategies, in selection order:
   `{ guard, …semanticOwnedPayloadFields }` and explicitly forbids every other
   payload field. The governed form also permits the blocked report above when no outcome matches.
   Both forms exclude the runtime-injected direct-Captain
-  `question` and `response` fields above. The prompt shall identify hidden control work,
+  `question` and `response` fields above. A direct-Captain prompt keeps each
+  description and states under it the exact reply that key takes — `guard`
+  plus the structural fields its `Output shall include` clause names, each with
+  its authored placeholder — naming `question` and `response` as
+  runtime-supplied. The prompt shall identify hidden control work,
   prohibit tool use, file inspection, and external evidence, direct the judge
   to decide only from the supplied actor output and declared outcomes, and
   require exactly one JSON object with no prose. The judge prompt shall not

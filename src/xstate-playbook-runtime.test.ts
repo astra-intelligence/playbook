@@ -3022,16 +3022,31 @@ describe('direct-Captain actor over the shared factory', () => {
     await runtime.dispose();
   });
 
-  it('rejects a judge reply that supplies the presentation field itself', async () => {
+  it('parks a judge that keeps supplying the presentation field itself', async () => {
+    // DR-089: the hidden judge never replaces the visible text; a reply that
+    // supplies it is a structural error with one correction, and a second
+    // such reply parks the step for Boss instead of rejecting the turn.
+    let judgeCalls = 0;
     const { ports } = makeRecordingPorts({
       callCaptain: async () => ({ status: 'ok', finalText: 'Real answer.' }),
-      callJudge: async () => '{"guard":"final","response":"paraphrased"}',
+      callJudge: async () => {
+        judgeCalls += 1;
+        return '{"guard":"final","response":"paraphrased"}';
+      },
     });
     const runtime = createCaptainRuntime({});
     await runtime.init(makeSession(ports));
-    await expect(
-      runtime.handleBossInput(turn('release timing')),
-    ).rejects.toThrow(/undeclared field "response"/);
+    const result = await runtime.handleBossInput(turn('release timing'));
+    expect(judgeCalls).toBe(2);
+    expect(result.outcome).toBe('failed');
+    expect(result.state.stateId).toBe('failed');
+    expect('error' in result ? result.error : undefined).toMatchObject({
+      message: expect.stringContaining('undeclared field "response"') as unknown as string,
+      cause: {
+        code: 'judge-failed',
+        evidence: { reason: 'corrective semantic candidate is invalid' },
+      },
+    });
     await runtime.dispose();
   });
 
@@ -11217,3 +11232,164 @@ function cloneMachineConfig(value: unknown): any {
   }
   return value;
 }
+
+// W-23 shape 3: a direct-Captain state reads Boss's answer to a go/no-go
+// question. The hidden judge added a field the `rejected` outcome does not
+// declare, and the adjudicator threw it as an uncaught control-plane error
+// after Boss's "no" had been delivered (DR-089).
+const ROLLOUT_RESULTS = {
+  approved:
+    'Boss answered yes. On this outcome the playbook ends reporting the plan as approved for rollout, returning the latest commit hash and the plan path.',
+  rejected:
+    "Boss answered no. On this outcome the playbook ends reporting the plan as rejected, returning the plan path and Boss's reason as given in the answer.",
+  needsBossReply:
+    "The acting agent's prose surfaces a clarifying question for Boss that the agent cannot answer alone. Output shall include `question: <verbatim question text from the acting agent's prose>`.",
+} as const;
+
+const rolloutConfirmationMachine = createMachine({
+  id: 'rollout-confirmation',
+  context: {
+    answer: undefined as string | undefined,
+    lastError: undefined as unknown,
+  },
+  initial: 'ready',
+  states: {
+    ready: {
+      meta: meta('ready'),
+      tags: ['playbook.parked'],
+      on: {
+        GO: {
+          target: 'confirmRollout',
+          actions: assign({
+            answer: ({ event }) => (event as { answer: string }).answer,
+          }),
+        },
+      },
+    },
+    confirmRollout: {
+      meta: meta('confirmRollout'),
+      tags: ['playbook.busy'],
+      invoke: {
+        src: 'captain',
+        input: ({ context }) => ({
+          stateId: 'confirmRollout',
+          sourceItem: 'ROLLOUT-5',
+          prompt: 'Boss answered the go/no-go question: <answer>',
+          answer: context.answer,
+          result: ROLLOUT_RESULTS,
+        }),
+        onDone: [
+          {
+            guard: ({ event }) =>
+              (event.output as { guard: string }).guard === 'approved',
+            target: 'approved',
+          },
+          {
+            guard: ({ event }) =>
+              (event.output as { guard: string }).guard === 'rejected',
+            target: 'rejected',
+          },
+          { target: 'failed' },
+        ],
+        onError: {
+          target: 'failed',
+          actions: assign({ lastError: ({ event }) => event.error }),
+        },
+      },
+    },
+    approved: { meta: meta('approved'), tags: ['playbook.parked'] },
+    rejected: { meta: meta('rejected'), tags: ['playbook.parked'] },
+    failed: {
+      meta: meta('failed'),
+      tags: ['playbook.parked'],
+      on: { GO: 'confirmRollout' },
+    },
+  },
+});
+
+const createRolloutConfirmationRuntime = () =>
+  createXStatePlaybookRuntime(rolloutConfirmationMachine, {
+    compat: { artifactSchema: 3, runtimeAbi: RUNTIME_ABI },
+    snapshotOptions: (value) => (value ?? {}) as Record<string, never>,
+    roleStates: {},
+    entryEvent: { type: 'GO', textField: 'answer' },
+    outcomeAuthority: ROLELESS_OUTCOME_AUTHORITY,
+  })(governedRuntimeConstruction({}, 'rollout'));
+
+const ROLLOUT_CAPTAIN_REPLY = [
+  "I haven't started the rollout, because you said no.",
+  'The plan stays as the record, unchanged: `docs/rollouts/account-activity-66e9620.md` at commit `6e075a2`.',
+].join('\n');
+
+describe('DR-089 direct-Captain adjudication reply shapes', () => {
+  it('prints each outcome\'s reply shape and corrects an undeclared field once (W-23 trace)', async () => {
+    const judgePrompts: string[] = [];
+    const replies = [
+      '{"guard":"rejected","planPath":"docs/rollouts/account-activity-66e9620.md"}',
+      '{"guard":"rejected"}',
+    ];
+    const { ports } = makeRecordingPorts({
+      callCaptain: async () => ({ status: 'ok', finalText: ROLLOUT_CAPTAIN_REPLY }),
+      callJudge: async (prompt) => {
+        judgePrompts.push(prompt);
+        const reply = replies.shift();
+        if (reply === undefined) throw new Error('unexpected judge call');
+        return reply;
+      },
+    });
+    const runtime = createRolloutConfirmationRuntime();
+    await runtime.init(makeSession(ports));
+
+    const result = await runtime.handleBossInput(
+      turn('No. Do not start the rollout; the plan stays as the record.'),
+    );
+
+    expect(result.state.stateId).toBe('rejected');
+    expect(judgePrompts).toHaveLength(2);
+    expect(judgePrompts[0]).toContain(
+      `- \`rejected\` — ${ROLLOUT_RESULTS.rejected}\n` +
+        '  Reply exactly: { "guard": "rejected" }',
+    );
+    expect(judgePrompts[0]).toContain(
+      `- \`needsBossReply\` — ${ROLLOUT_RESULTS.needsBossReply}\n` +
+        '  Reply exactly: { "guard": "needsBossReply" }\n' +
+        '  Runtime-supplied, do not include: `question`',
+    );
+    expect(judgePrompts[0]).not.toContain('structurally invalid');
+    expect(judgePrompts[1]).toContain(
+      'Your first reply was structurally invalid:\n\n```\n' +
+        '{"guard":"rejected","planPath":"docs/rollouts/account-activity-66e9620.md"}\n```',
+    );
+    expect(judgePrompts[1]).toContain(
+      'Validation error: adjudicate: judge response supplied undeclared field "planPath" for guard "rejected"',
+    );
+    await runtime.dispose();
+  });
+
+  it('parks a twice-invalid Captain adjudication for Boss as a decided judge failure', async () => {
+    let judgeCalls = 0;
+    const { ports } = makeRecordingPorts({
+      callCaptain: async () => ({ status: 'ok', finalText: ROLLOUT_CAPTAIN_REPLY }),
+      callJudge: async () => {
+        judgeCalls += 1;
+        return '{"guard":"rejected","planPath":"docs/rollouts/account-activity-66e9620.md"}';
+      },
+    });
+    const runtime = createRolloutConfirmationRuntime();
+    await runtime.init(makeSession(ports));
+
+    const result = await runtime.handleBossInput(turn('No.'));
+
+    expect(judgeCalls).toBe(2);
+    expect(result.outcome).toBe('failed');
+    expect(result.state.stateId).toBe('failed');
+    expect('error' in result ? result.error : undefined).toMatchObject({
+      cause: {
+        code: 'judge-failed',
+        evidence: { reason: 'corrective semantic candidate is invalid' },
+      },
+    });
+    expect(runtime.describe?.().state.stateId).toBe('failed');
+    await runtime.dispose();
+  });
+});

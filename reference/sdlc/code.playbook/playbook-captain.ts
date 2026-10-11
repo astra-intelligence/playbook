@@ -1490,6 +1490,63 @@ function carriedPreExistingFacts(
   });
 }
 
+// DR-089: a turn whose leaf parks in failure still states, as fact, every
+// commit its steps proved before the failure, so a closing reply never tells
+// the Boss that nothing was written when a receipt shows otherwise. A commit
+// the unresolved-effect report already names is not said twice.
+interface CommitBeforeFailure {
+  readonly baselineHead: string;
+  readonly commitOid: string;
+}
+
+function commitsBeforeFailure(
+  ledger: PlaybookEffectLedger,
+  boundaryPrefixCount: number,
+  unresolvedEffects: readonly PlaybookCaptainUnresolvedEffect[],
+): readonly CommitBeforeFailure[] {
+  const named = new Set(
+    unresolvedEffects.flatMap(({ commitOid }) =>
+      commitOid === undefined ? [] : [commitOid],
+    ),
+  );
+  const commits: CommitBeforeFailure[] = [];
+  for (const boundary of ledger.boundaries) {
+    if (boundary.sequence <= boundaryPrefixCount) continue;
+    const receipt = boundary.physicalReceipt;
+    if (
+      receipt?.classification !== 'one-descendant-commit' ||
+      receipt.commitOid === undefined ||
+      named.has(receipt.commitOid)
+    ) {
+      continue;
+    }
+    named.add(receipt.commitOid);
+    commits.push({
+      baselineHead: receipt.baseline.head,
+      commitOid: receipt.commitOid,
+    });
+  }
+  return commits;
+}
+
+function commitBeforeFailureFact(commit: CommitBeforeFailure): string {
+  return `Before the failure, a step made one new commit; HEAD moved from ${commit.baselineHead} to the proven commit ${commit.commitOid}.`;
+}
+
+function commitsBeforeFailureReport(
+  commits: readonly CommitBeforeFailure[],
+): string | undefined {
+  if (commits.length === 0) return undefined;
+  return [
+    'Repository changes made before the failure:',
+    ...commits.map(
+      ({ baselineHead, commitOid }) =>
+        `- A step made one new commit; HEAD moved from ${baselineHead} to the proven commit ${commitOid}.`,
+    ),
+    'The failure does not undo these commits.',
+  ].join('\n');
+}
+
 // DR-063 §4: the Boss-visible failure report. Every host sees the same
 // sentences because the shell composes them from the structured cause instead
 // of asking a model to describe facts it may drop. The report exposes no file
@@ -8965,6 +9022,31 @@ export function createPlaybookCaptainShell(
       controls: failureControlLines(view, fenced),
     };
     joinSettlementFact(turn, fact, statement?.fact, speak);
+    reportCommitsBeforeFailure(turn, unresolvedEffects);
+  };
+
+  // DR-089: the commits the turn's receipts proved before its leaf parked,
+  // stated beside the failure report and joined to the settlement facts the
+  // closing-reply prompt reads.
+  const reportCommitsBeforeFailure = (
+    turn: ActiveTurn,
+    unresolvedEffects: readonly PlaybookCaptainUnresolvedEffect[],
+  ): void => {
+    let commits: readonly CommitBeforeFailure[];
+    try {
+      commits = commitsBeforeFailure(
+        assertPlaybookEffectLedger(currentEffectLedger()),
+        presentedEffectPrefix,
+        unresolvedEffects,
+      );
+    } catch {
+      return;
+    }
+    const report = commitsBeforeFailureReport(commits);
+    if (report === undefined) return;
+    const facts = commits.map(commitBeforeFailureFact);
+    appendMandatoryPresentationSuffix(turn, report, facts);
+    for (const fact of facts) joinSettlementFact(turn, fact);
   };
 
   // The runtimes own each frame's position. The shell only joins their stack.

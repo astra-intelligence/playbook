@@ -1,4 +1,5 @@
 import type { AnyStateMachine, EventObject, PromiseActorLogic } from 'xstate';
+import { type PlaybookSemanticValueShape, type PlaybookSemanticValueShapes } from './xstate-runtime.js';
 import type { CaptainResult, JsonValue, PlaybookEffectBoundary, PlaybookEffectBoundaryStart, PlaybookEffectLedger, PlaybookEffectLedgerCapability, NormalizedError, PlaybookFailureCause, PlaybookPendingBossQuestion, PlaybookPorts, PlaybookRepositoryReceipt, PlaybookRuntimeFactory, PlaybookSession, PlaybookState, PlayerResult } from './runtime.js';
 export interface PlaybookPendingBossQuestionContext {
     questionId: string;
@@ -494,7 +495,7 @@ export declare function defaultBuildJudgePrompt(input: PlaybookPlayerInput, fina
  * self-inflicted defect. Exported so linked machinery of an artifact's own
  * renders the identical contract instead of restating it.
  */
-export declare function renderGovernedOutcomeContract(guard: string, description: string, outcome: XStateGovernedOutcomeSpec | undefined): string[];
+export declare function renderGovernedOutcomeContract(guard: string, description: string, outcome: XStateGovernedOutcomeSpec | undefined, shapes?: Readonly<Record<string, PlaybookSemanticValueShape>>): string[];
 export interface PlayerAdjudicationSpec {
     buildJudgePrompt?: (input: PlaybookPlayerInput, finalText: string) => string;
     extractRequiredFields?: (description: string) => string[];
@@ -522,13 +523,22 @@ export declare function createPlayerBridge(spec: PlayerBridgeSpec, ports: Playbo
 /**
  * Default direct-Captain adjudicator prompt (DR-025). The single statement of
  * the `{ guard, …structuralPayloadFields }` reply contract, shared with the
- * compiled default Captain artifact so the wording cannot drift.
+ * compiled default Captain artifact so the wording cannot drift. Each declared
+ * key keeps its description verbatim and gains the exact reply it takes
+ * (DR-089): `guard` plus the structural fields its `Output shall include`
+ * clause names, each with its authored placeholder, while the visible
+ * `question` and `response` fields are named as runtime-supplied. A
+ * `correction` restates a structurally invalid first reply and its
+ * validation error for the one corrective adjudication.
  */
 export declare function defaultBuildCaptainJudgePrompt(input: {
     readonly stateId: string;
     readonly sourceItem: string;
     readonly result: Readonly<Record<string, string>>;
-}, finalText: string): string;
+}, finalText: string, correction?: {
+    readonly reply: string;
+    readonly error: string;
+}): string;
 /**
  * Targets of the FSM's `awaitBossReply` BOSS_REPLY transitions, plus — for
  * the parallel shape gears2fsm compiles (DR-067) — the targets of each
@@ -554,6 +564,13 @@ export declare function stateDescriptionsFromMachine(machine: AnyStateMachine): 
  * other than `success` or `failure`, is a malformed artifact and throws.
  */
 export declare function terminalOutcomesFromMachine(machine: AnyStateMachine, label?: string): ReadonlyMap<string, 'success' | 'failure'>;
+/**
+ * DR-089: the non-string JSON value shape the compiled machine admits for
+ * each semantic-owned field of each governed outcome, keyed by state id and
+ * then by outcome. Exported so linked machinery of an artifact's own reads
+ * the same contract the shared factory enforces.
+ */
+export declare function inferSemanticValueShapes(machine: AnyStateMachine, authority: XStateOutcomeAuthoritySpec): ReadonlyMap<string, PlaybookSemanticValueShapes>;
 /**
  * Build a `PlaybookRuntimeFactory` that interprets the given FSM artifact
  * under the slc/link.md contract. The factory provides every actor kind the
