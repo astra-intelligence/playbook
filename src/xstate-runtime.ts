@@ -1346,6 +1346,73 @@ export interface PlaybookSemanticOutcomeSpec {
   readonly repositoryDisposition: PlaybookRepositoryDisposition;
 }
 
+/**
+ * The JSON value shape a compiled machine admits for one semantic-owned field
+ * (DR-089). A field the machine admits as a string, or whose shape the
+ * machine does not reveal, is `string`.
+ */
+export type PlaybookSemanticValueShape =
+  | 'string'
+  | 'string-array'
+  | 'number-array'
+  | 'string-or-number-array'
+  | 'number'
+  | 'boolean';
+
+/**
+ * Per outcome, the non-string shapes of its semantic-owned fields; a field
+ * left out is a string.
+ */
+export type PlaybookSemanticValueShapes = Readonly<
+  Record<string, Readonly<Record<string, PlaybookSemanticValueShape>>>
+>;
+
+const SEMANTIC_VALUE_SHAPE_WORDS: Readonly<
+  Record<PlaybookSemanticValueShape, string>
+> = {
+  string: 'a JSON string',
+  'string-array': 'a JSON array of strings',
+  'number-array': 'a JSON array of numbers',
+  'string-or-number-array': 'a JSON array of strings or numbers',
+  number: 'a JSON number',
+  boolean: 'a JSON boolean',
+};
+
+/** The words a judge prompt or validation error uses for one value shape. */
+export function describePlaybookSemanticValueShape(
+  shape: PlaybookSemanticValueShape,
+): string {
+  return SEMANTIC_VALUE_SHAPE_WORDS[shape];
+}
+
+/** Whether one detached JSON value has the given semantic value shape. */
+function isPlaybookSemanticValueShape(
+  value: unknown,
+  shape: PlaybookSemanticValueShape,
+): boolean {
+  const isFiniteNumber = (entry: unknown): boolean =>
+    typeof entry === 'number' && Number.isFinite(entry);
+  switch (shape) {
+    case 'string':
+      return typeof value === 'string';
+    case 'number':
+      return isFiniteNumber(value);
+    case 'boolean':
+      return typeof value === 'boolean';
+    case 'string-array':
+      return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
+    case 'number-array':
+      return Array.isArray(value) && value.every(isFiniteNumber);
+    case 'string-or-number-array':
+      return (
+        Array.isArray(value) &&
+        value.every((entry) => typeof entry === 'string' || isFiniteNumber(entry))
+      );
+    default:
+      return false;
+  }
+}
+
 /** Evidence available when one governed semantic candidate is reconciled. */
 export interface PlaybookSemanticEvidenceInput {
   readonly outcomes: Readonly<Record<string, PlaybookSemanticOutcomeSpec>>;
@@ -1353,11 +1420,16 @@ export interface PlaybookSemanticEvidenceInput {
   readonly finalText?: unknown;
   readonly receipt?: unknown;
   readonly runtimeFields?: unknown;
+  /**
+   * DR-089: the shape the compiled machine admits for each semantic-owned
+   * field, keyed by outcome; every field it leaves out is a string.
+   */
+  readonly semanticValueShapes?: PlaybookSemanticValueShapes;
 }
 
 /** The exact detached actor output admitted to FSM delivery. */
 export type PlaybookReconciledSemanticOutput = Readonly<
-  Record<string, string>
+  Record<string, JsonValue>
 > & {
   readonly guard: string;
 };
@@ -1365,7 +1437,7 @@ export type PlaybookReconciledSemanticOutput = Readonly<
 /** Retained presentation and semantic evidence, kept separate from output. */
 export interface PlaybookRetainedSemanticEvidence {
   readonly finalText?: string;
-  readonly semanticCandidate: Readonly<Record<string, string>>;
+  readonly semanticCandidate: Readonly<Record<string, JsonValue>>;
 }
 
 export type PlaybookSemanticReconciliationReason =
@@ -1412,8 +1484,9 @@ function semanticCandidateStructureError(message: string): never {
 function snapshotSemanticCandidate(
   value: unknown,
   outcomes: Readonly<Record<string, PlaybookSemanticOutcomeSpec>>,
+  shapes: PlaybookSemanticValueShapes | undefined,
 ): {
-  readonly candidate: Readonly<Record<string, string>> & {
+  readonly candidate: Readonly<Record<string, JsonValue>> & {
     readonly guard: string;
   };
   readonly outcome: PlaybookSemanticOutcomeSpec;
@@ -1452,15 +1525,25 @@ function snapshotSemanticCandidate(
         (extra.length === 0 ? '' : `; extra or wrongly owned ${extra.join(', ')}`),
     );
   }
+  // DR-089: each semantic-owned field has the shape the compiled machine
+  // admits for it, a string unless the machine admits another.
+  const outcomeShapes =
+    shapes !== undefined && own(shapes, guard) ? shapes[guard] : undefined;
   for (const field of semanticFields) {
-    if (typeof detached[field] !== 'string') {
+    const shape =
+      outcomeShapes !== undefined && own(outcomeShapes, field)
+        ? outcomeShapes[field]!
+        : 'string';
+    if (!isPlaybookSemanticValueShape(detached[field], shape)) {
       semanticCandidateStructureError(
-        `field ${JSON.stringify(field)} must be a string`,
+        shape === 'string'
+          ? `field ${JSON.stringify(field)} must be a string`
+          : `field ${JSON.stringify(field)} must be ${describePlaybookSemanticValueShape(shape)}`,
       );
     }
   }
   return {
-    candidate: detached as Readonly<Record<string, string>> & {
+    candidate: detached as Readonly<Record<string, JsonValue>> & {
       readonly guard: string;
     },
     outcome,
@@ -1468,7 +1551,7 @@ function snapshotSemanticCandidate(
 }
 
 function retainedSemanticEvidence(
-  candidate: Readonly<Record<string, string>>,
+  candidate: Readonly<Record<string, JsonValue>>,
   finalText: unknown,
 ): PlaybookRetainedSemanticEvidence {
   return Object.freeze({
@@ -1664,7 +1747,7 @@ export function reconcilePlaybookSemanticEvidence(
       typeof report.blocked === 'string' && report.blocked.trim().length > 0) {
     return unresolvedSemanticEvidence(
       'no-matching-outcome',
-      retainedSemanticEvidence(report as Readonly<Record<string, string>>, input.finalText),
+      retainedSemanticEvidence(report as Readonly<Record<string, JsonValue>>, input.finalText),
       assertPlaybookFailureCause({
         code: 'runtime-defect',
         evidence: { reason: `No declared outcome matches: ${report.blocked}` },
@@ -1674,6 +1757,7 @@ export function reconcilePlaybookSemanticEvidence(
   const { candidate, outcome } = snapshotSemanticCandidate(
     input.semanticCandidate,
     input.outcomes,
+    input.semanticValueShapes,
   );
   const evidence = retainedSemanticEvidence(candidate, input.finalText);
   const finalText =
@@ -1761,10 +1845,10 @@ export function reconcilePlaybookSemanticEvidence(
     return unresolvedSemanticEvidence('inconsistent-runtime-evidence', evidence);
   }
 
-  const output: Record<string, string> = {};
+  const output: Record<string, JsonValue> = {};
   defineEnumerableDataProperty(output, 'guard', candidate.guard);
   for (const [field, authority] of Object.entries(outcome.fields)) {
-    let value: string | undefined;
+    let value: JsonValue | undefined;
     if (authority === 'semantic') {
       value = candidate[field];
     } else if (authority === 'presentation') {

@@ -902,6 +902,39 @@ function effectReceipt(value, path, expectedBaseline, expectedAfter, matchExpect
     }
     return value;
 }
+const SEMANTIC_VALUE_SHAPE_WORDS = {
+    string: 'a JSON string',
+    'string-array': 'a JSON array of strings',
+    'number-array': 'a JSON array of numbers',
+    'string-or-number-array': 'a JSON array of strings or numbers',
+    number: 'a JSON number',
+    boolean: 'a JSON boolean',
+};
+/** The words a judge prompt or validation error uses for one value shape. */
+export function describePlaybookSemanticValueShape(shape) {
+    return SEMANTIC_VALUE_SHAPE_WORDS[shape];
+}
+/** Whether one detached JSON value has the given semantic value shape. */
+function isPlaybookSemanticValueShape(value, shape) {
+    const isFiniteNumber = (entry) => typeof entry === 'number' && Number.isFinite(entry);
+    switch (shape) {
+        case 'string':
+            return typeof value === 'string';
+        case 'number':
+            return isFiniteNumber(value);
+        case 'boolean':
+            return typeof value === 'boolean';
+        case 'string-array':
+            return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
+        case 'number-array':
+            return Array.isArray(value) && value.every(isFiniteNumber);
+        case 'string-or-number-array':
+            return (Array.isArray(value) &&
+                value.every((entry) => typeof entry === 'string' || isFiniteNumber(entry)));
+        default:
+            return false;
+    }
+}
 /**
  * A judge candidate is structurally invalid, rather than merely awaiting or
  * conflicting with effect evidence. Callers use this distinction to spend at
@@ -916,7 +949,7 @@ export class PlaybookSemanticCandidateStructureError extends TypeError {
 function semanticCandidateStructureError(message) {
     throw new PlaybookSemanticCandidateStructureError(message);
 }
-function snapshotSemanticCandidate(value, outcomes) {
+function snapshotSemanticCandidate(value, outcomes, shapes) {
     let detached;
     try {
         detached = snapshotJsonValue(value, 'semantic candidate');
@@ -948,9 +981,17 @@ function snapshotSemanticCandidate(value, outcomes) {
             (missing.length === 0 ? '' : `; missing ${missing.join(', ')}`) +
             (extra.length === 0 ? '' : `; extra or wrongly owned ${extra.join(', ')}`));
     }
+    // DR-089: each semantic-owned field has the shape the compiled machine
+    // admits for it, a string unless the machine admits another.
+    const outcomeShapes = shapes !== undefined && own(shapes, guard) ? shapes[guard] : undefined;
     for (const field of semanticFields) {
-        if (typeof detached[field] !== 'string') {
-            semanticCandidateStructureError(`field ${JSON.stringify(field)} must be a string`);
+        const shape = outcomeShapes !== undefined && own(outcomeShapes, field)
+            ? outcomeShapes[field]
+            : 'string';
+        if (!isPlaybookSemanticValueShape(detached[field], shape)) {
+            semanticCandidateStructureError(shape === 'string'
+                ? `field ${JSON.stringify(field)} must be a string`
+                : `field ${JSON.stringify(field)} must be ${describePlaybookSemanticValueShape(shape)}`);
         }
     }
     return {
@@ -1117,7 +1158,7 @@ export function reconcilePlaybookSemanticEvidence(input) {
             evidence: { reason: `No declared outcome matches: ${report.blocked}` },
         }));
     }
-    const { candidate, outcome } = snapshotSemanticCandidate(input.semanticCandidate, input.outcomes);
+    const { candidate, outcome } = snapshotSemanticCandidate(input.semanticCandidate, input.outcomes, input.semanticValueShapes);
     const evidence = retainedSemanticEvidence(candidate, input.finalText);
     const finalText = typeof input.finalText === 'string' ? input.finalText.trim() : undefined;
     if (finalText === undefined || finalText.length === 0) {

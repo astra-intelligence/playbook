@@ -54,6 +54,19 @@ export interface PlaybookSemanticOutcomeSpec {
     readonly fields: Readonly<Record<string, PlaybookSemanticFieldAuthority>>;
     readonly repositoryDisposition: PlaybookRepositoryDisposition;
 }
+/**
+ * The JSON value shape a compiled machine admits for one semantic-owned field
+ * (DR-089). A field the machine admits as a string, or whose shape the
+ * machine does not reveal, is `string`.
+ */
+export type PlaybookSemanticValueShape = 'string' | 'string-array' | 'number-array' | 'string-or-number-array' | 'number' | 'boolean';
+/**
+ * Per outcome, the non-string shapes of its semantic-owned fields; a field
+ * left out is a string.
+ */
+export type PlaybookSemanticValueShapes = Readonly<Record<string, Readonly<Record<string, PlaybookSemanticValueShape>>>>;
+/** The words a judge prompt or validation error uses for one value shape. */
+export declare function describePlaybookSemanticValueShape(shape: PlaybookSemanticValueShape): string;
 /** Evidence available when one governed semantic candidate is reconciled. */
 export interface PlaybookSemanticEvidenceInput {
     readonly outcomes: Readonly<Record<string, PlaybookSemanticOutcomeSpec>>;
@@ -61,15 +74,20 @@ export interface PlaybookSemanticEvidenceInput {
     readonly finalText?: unknown;
     readonly receipt?: unknown;
     readonly runtimeFields?: unknown;
+    /**
+     * DR-089: the shape the compiled machine admits for each semantic-owned
+     * field, keyed by outcome; every field it leaves out is a string.
+     */
+    readonly semanticValueShapes?: PlaybookSemanticValueShapes;
 }
 /** The exact detached actor output admitted to FSM delivery. */
-export type PlaybookReconciledSemanticOutput = Readonly<Record<string, string>> & {
+export type PlaybookReconciledSemanticOutput = Readonly<Record<string, JsonValue>> & {
     readonly guard: string;
 };
 /** Retained presentation and semantic evidence, kept separate from output. */
 export interface PlaybookRetainedSemanticEvidence {
     readonly finalText?: string;
-    readonly semanticCandidate: Readonly<Record<string, string>>;
+    readonly semanticCandidate: Readonly<Record<string, JsonValue>>;
 }
 export type PlaybookSemanticReconciliationReason = 'no-matching-outcome' | 'missing-presentation-evidence' | 'missing-repository-receipt' | 'invalid-repository-receipt' | 'repository-disposition-mismatch' | 'missing-effect-evidence' | 'missing-runtime-evidence' | 'inconsistent-runtime-evidence';
 /** A fail-closed semantic/effect reconciliation decision. */

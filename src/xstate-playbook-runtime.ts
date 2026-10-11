@@ -28,6 +28,7 @@ import type {
   PromiseActorLogic,
 } from 'xstate';
 import {
+  ACCEPTED_OUTCOME_ACTION_TYPE,
   createAcceptedOutcomeConsumer,
   type AcceptedOutcomeReceipt,
 } from './accepted-outcome.js';
@@ -38,6 +39,7 @@ import {
   attachPlaybookFailureCause,
   combineAbortSignals,
   createNestedPlaybookBridge,
+  describePlaybookSemanticValueShape,
   detachPersistedMachineSnapshot,
   normalizeError,
   normalizePlaybookSnapshot,
@@ -49,6 +51,8 @@ import {
   validateCaptainResult,
   validatePlayerResult,
   waitForPlaybookQuiescence,
+  type PlaybookSemanticValueShape,
+  type PlaybookSemanticValueShapes,
 } from './xstate-runtime.js';
 import type {
   CaptainResult,
@@ -1760,6 +1764,7 @@ export function renderGovernedOutcomeContract(
   guard: string,
   description: string,
   outcome: XStateGovernedOutcomeSpec | undefined,
+  shapes?: Readonly<Record<string, PlaybookSemanticValueShape>>,
 ): string[] {
   const { meaning, clause } = splitOutputClause(description);
   // Each field's authored segment runs from its token to the next token:
@@ -1790,13 +1795,24 @@ export function renderGovernedOutcomeContract(
   }
   const replyMembers = [`"guard": ${JSON.stringify(guard)}`];
   const semanticAsAuthored: string[] = [];
+  const valueShapes: string[] = [];
   const runtimeSupplied: string[] = [];
   for (const [field, authority] of Object.entries(outcome?.fields ?? {})) {
     if (authority === 'semantic') {
       const entry = authored.get(field);
+      // DR-089: the value has the shape the compiled machine admits.
+      const shape =
+        shapes !== undefined && Object.prototype.hasOwnProperty.call(shapes, field)
+          ? shapes[field]!
+          : 'string';
+      const words = describePlaybookSemanticValueShape(shape);
       replyMembers.push(
-        `${JSON.stringify(field)}: ${entry?.placeholder ?? '<string>'}`,
+        `${JSON.stringify(field)}: ${
+          entry?.placeholder ??
+          (shape === 'string' ? '<string>' : `<${words.replace(/^a /, '')}>`)
+        }`,
       );
+      if (shape !== 'string') valueShapes.push(`\`${field}\` is ${words}`);
       semanticAsAuthored.push(entry?.segment ?? `\`${field}\``);
     } else {
       runtimeSupplied.push(`\`${field}\` (${authority}-owned)`);
@@ -1806,6 +1822,9 @@ export function renderGovernedOutcomeContract(
     meaning.length === 0 ? `- \`${guard}\`` : `- \`${guard}\` — ${meaning}`,
     `  Reply exactly: { ${replyMembers.join(', ')} }`,
   ];
+  if (valueShapes.length > 0) {
+    lines.push(`  JSON value shape: ${valueShapes.join('; ')}`);
+  }
   if (semanticAsAuthored.length > 0) {
     lines.push(
       `  Semantic fields as authored: ${semanticAsAuthored.join('; ')}`,
@@ -1824,6 +1843,7 @@ function buildGovernedJudgePrompt(
   finalText: string,
   outcomes: Readonly<Record<string, XStateGovernedOutcomeSpec>>,
   correction?: { readonly reply: string; readonly error: string },
+  shapes?: PlaybookSemanticValueShapes,
 ): string {
   const lines = [
     'This is hidden control work. Do not call tools, inspect files, or seek external evidence.',
@@ -1844,7 +1864,12 @@ function buildGovernedJudgePrompt(
   ];
   for (const [guard, description] of Object.entries(input.result)) {
     lines.push(
-      ...renderGovernedOutcomeContract(guard, description, outcomes[guard]),
+      ...renderGovernedOutcomeContract(
+        guard,
+        description,
+        outcomes[guard],
+        shapes?.[guard],
+      ),
     );
   }
   if (correction !== undefined) {
@@ -2103,7 +2128,13 @@ export function createPlayerBridge(
 /**
  * Default direct-Captain adjudicator prompt (DR-025). The single statement of
  * the `{ guard, …structuralPayloadFields }` reply contract, shared with the
- * compiled default Captain artifact so the wording cannot drift.
+ * compiled default Captain artifact so the wording cannot drift. Each declared
+ * key keeps its description verbatim and gains the exact reply it takes
+ * (DR-089): `guard` plus the structural fields its `Output shall include`
+ * clause names, each with its authored placeholder, while the visible
+ * `question` and `response` fields are named as runtime-supplied. A
+ * `correction` restates a structurally invalid first reply and its
+ * validation error for the one corrective adjudication.
  */
 export function defaultBuildCaptainJudgePrompt(
   input: {
@@ -2112,6 +2143,7 @@ export function defaultBuildCaptainJudgePrompt(
     readonly result: Readonly<Record<string, string>>;
   },
   finalText: string,
+  correction?: { readonly reply: string; readonly error: string },
 ): string {
   const lines: string[] = [];
   lines.push('Adjudicate the direct Captain output for this FSM state.');
@@ -2126,6 +2158,35 @@ export function defaultBuildCaptainJudgePrompt(
   lines.push('Result keys and descriptions:');
   for (const [key, description] of Object.entries(input.result)) {
     lines.push(`- \`${key}\` — ${description}`);
+    const { clause } = splitOutputClause(description);
+    const replyMembers = [`"guard": ${JSON.stringify(key)}`];
+    const runtimeSupplied: string[] = [];
+    const seen = new Set<string>();
+    for (const m of clause === undefined
+      ? []
+      : clause.matchAll(PAYLOAD_FIELD_PATTERN)) {
+      const field = m[1]!;
+      if (seen.has(field)) continue;
+      seen.add(field);
+      if (field === 'question' || field === 'response') {
+        runtimeSupplied.push(`\`${field}\``);
+        continue;
+      }
+      const placeholder = m[2]?.trim();
+      replyMembers.push(
+        `${JSON.stringify(field)}: ${
+          placeholder !== undefined && placeholder.length > 0
+            ? placeholder
+            : '<value>'
+        }`,
+      );
+    }
+    lines.push(`  Reply exactly: { ${replyMembers.join(', ')} }`);
+    if (runtimeSupplied.length > 0) {
+      lines.push(
+        `  Runtime-supplied, do not include: ${runtimeSupplied.join(', ')}`,
+      );
+    }
   }
   lines.push('');
   lines.push(
@@ -2133,7 +2194,36 @@ export function defaultBuildCaptainJudgePrompt(
       '`{ guard, …structuralPayloadFields }`. Do not include `question` or ' +
       '`response`; the runtime injects the visible text.',
   );
+  lines.push(
+    'Reply with exactly that outcome\'s reply shape above and no other field.',
+  );
+  if (correction !== undefined) {
+    lines.push(
+      '',
+      'Your first reply was structurally invalid:',
+      '',
+      '```',
+      correction.reply,
+      '```',
+      '',
+      `Validation error: ${correction.error}`,
+      'Correct only that structure using the same Captain output and outcome schema.',
+    );
+  }
   return lines.join('\n');
+}
+
+/**
+ * A direct-Captain adjudication reply that fails structural validation
+ * (DR-089): it earns one corrective adjudication, and a second such reply
+ * parks the step as a decided `judge-failed` failure rather than escaping as
+ * a control-plane error.
+ */
+class CaptainAdjudicationStructureError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CaptainAdjudicationStructureError';
+  }
 }
 
 function adjudicateCaptainOutput(
@@ -2142,17 +2232,28 @@ function adjudicateCaptainOutput(
   finalText: string,
   judgeText: string,
 ): PlaybookActorOutput {
-  const parsed = parseJudgeJson(judgeText);
+  let parsed: unknown;
+  try {
+    parsed = parseJudgeJson(judgeText);
+  } catch (error) {
+    throw new CaptainAdjudicationStructureError(
+      `adjudicate: ${error instanceof Error ? error.message : 'judge response is not valid JSON'}`,
+    );
+  }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new Error('adjudicate: judge response is not a JSON object');
+    throw new CaptainAdjudicationStructureError(
+      'adjudicate: judge response is not a JSON object',
+    );
   }
   const obj = parsed as Record<string, unknown>;
   const guard = obj.guard;
   if (typeof guard !== 'string') {
-    throw new Error('adjudicate: judge response missing string "guard" field');
+    throw new CaptainAdjudicationStructureError(
+      'adjudicate: judge response missing string "guard" field',
+    );
   }
   if (!Object.prototype.hasOwnProperty.call(input.result, guard)) {
-    throw new Error(
+    throw new CaptainAdjudicationStructureError(
       `adjudicate: unknown guard "${guard}" — declared guards: ${Object.keys(
         input.result,
       ).join(', ')}`,
@@ -2165,7 +2266,7 @@ function adjudicateCaptainOutput(
   }
   for (const key of Object.keys(obj)) {
     if (!allowed.has(key)) {
-      throw new Error(
+      throw new CaptainAdjudicationStructureError(
         `adjudicate: judge response supplied undeclared field "${key}" for guard "${guard}"`,
       );
     }
@@ -2173,7 +2274,7 @@ function adjudicateCaptainOutput(
   for (const field of required) {
     if (field === 'question' || field === 'response') continue;
     if (obj[field] === undefined || obj[field] === null) {
-      throw new Error(
+      throw new CaptainAdjudicationStructureError(
         `adjudicate: judge response missing required field "${field}" for guard "${guard}"`,
       );
     }
@@ -3165,6 +3266,186 @@ function snapshotOutcomeAuthority(
   });
 }
 
+// ---------------------------------------------------------------------------
+// DR-089: one type contract for semantic-owned fields. The compiled machine's
+// own validator decides which JSON value it admits for each field, so the
+// runtime asks it once at construction: each governed outcome is presented to
+// the machine's transition selection — guards only, no action runs — with
+// sample values, and the first combination of shapes whose arm carries that
+// outcome's accepted-outcome marker is the contract the judge is shown and the
+// reconciler enforces. A field whose shape the machine does not reveal, or
+// that it admits as a string, stays a string.
+// ---------------------------------------------------------------------------
+
+const SEMANTIC_SHAPE_SAMPLES: readonly (readonly [
+  PlaybookSemanticValueShape,
+  JsonValue,
+])[] = [
+  ['string', 'sample'],
+  ['string-array', ['sample']],
+  ['number-array', [1]],
+  ['number', 1],
+  ['boolean', true],
+];
+const SHAPE_PROBE_TEXT = 'sample';
+const SHAPE_PROBE_COMMIT = '0123456789abcdef0123456789abcdef01234567';
+const SHAPE_PROBE_FIELD_LIMIT = 4;
+
+interface ProbedStateNode {
+  readonly key: string;
+  readonly path: readonly string[];
+  readonly config: { readonly id?: unknown; readonly meta?: unknown };
+  readonly invoke: readonly { readonly id: string; readonly src: unknown }[];
+  readonly states: Readonly<Record<string, ProbedStateNode>>;
+}
+
+function isAcceptedOutcomeMarker(
+  action: unknown,
+  stateId: string,
+  guard: string,
+): boolean {
+  if (!isPlainObject(action) || action.type !== ACCEPTED_OUTCOME_ACTION_TYPE) {
+    return false;
+  }
+  const params = action.params;
+  return (
+    isPlainObject(params) &&
+    params.source === stateId &&
+    params.acceptedOutcome === guard
+  );
+}
+
+function shapeCombinations(fieldCount: number): readonly number[][] {
+  const combinations: number[][] = [[]];
+  for (let field = 0; field < fieldCount; field += 1) {
+    const next: number[][] = [];
+    for (const prefix of combinations) {
+      for (let sample = 0; sample < SEMANTIC_SHAPE_SAMPLES.length; sample += 1) {
+        next.push([...prefix, sample]);
+      }
+    }
+    combinations.splice(0, combinations.length, ...next);
+  }
+  // Fewest non-string fields first, then the sample order, so a machine that
+  // admits strings keeps them.
+  return combinations.sort(
+    (left, right) =>
+      left.filter((index) => index !== 0).length -
+        right.filter((index) => index !== 0).length ||
+      left.join(',').localeCompare(right.join(',')),
+  );
+}
+
+/**
+ * DR-089: the non-string JSON value shape the compiled machine admits for
+ * each semantic-owned field of each governed outcome, keyed by state id and
+ * then by outcome. Exported so linked machinery of an artifact's own reads
+ * the same contract the shared factory enforces.
+ */
+export function inferSemanticValueShapes(
+  machine: AnyStateMachine,
+  authority: XStateOutcomeAuthoritySpec,
+): ReadonlyMap<string, PlaybookSemanticValueShapes> {
+  const shapesByState = new Map<string, PlaybookSemanticValueShapes>();
+  const playerNodes = new Map<string, ProbedStateNode>();
+  const visit = (node: ProbedStateNode): void => {
+    if (node.invoke.some(({ src }) => src === 'player')) {
+      const playbookMeta = isPlainObject(node.config.meta)
+        ? node.config.meta.playbook
+        : undefined;
+      const stateId =
+        isPlainObject(playbookMeta) && typeof playbookMeta.stateId === 'string'
+          ? playbookMeta.stateId
+          : typeof node.config.id === 'string'
+            ? node.config.id
+            : node.key;
+      if (!playerNodes.has(stateId)) playerNodes.set(stateId, node);
+    }
+    for (const child of Object.values(node.states)) visit(child);
+  };
+  try {
+    visit((machine as unknown as { root: ProbedStateNode }).root);
+  } catch {
+    return shapesByState;
+  }
+  const configContext = (machine as unknown as { config?: { context?: unknown } })
+    .config?.context;
+  const context = isPlainObject(configContext) ? configContext : {};
+  for (const [stateId, outcomes] of Object.entries(
+    authority.governedPlayerStates,
+  )) {
+    const node = playerNodes.get(stateId);
+    const invokeId = node?.invoke.find(({ src }) => src === 'player')?.id;
+    if (node === undefined || invokeId === undefined) continue;
+    let snapshot: unknown;
+    try {
+      const value = [...node.path].reduceRight<unknown>(
+        (inner, key) => (inner === undefined ? key : { [key]: inner }),
+        undefined,
+      );
+      snapshot = machine.resolveState({ value: value as never, context });
+    } catch {
+      continue;
+    }
+    const stateShapes: Record<string, Readonly<Record<string, PlaybookSemanticValueShape>>> = {};
+    for (const [guard, outcome] of Object.entries(outcomes)) {
+      const semanticFields = Object.entries(outcome.fields)
+        .filter(([, fieldAuthority]) => fieldAuthority === 'semantic')
+        .map(([field]) => field);
+      if (
+        semanticFields.length === 0 ||
+        semanticFields.length > SHAPE_PROBE_FIELD_LIMIT
+      ) {
+        continue;
+      }
+      const base: Record<string, JsonValue> = { guard };
+      for (const [field, fieldAuthority] of Object.entries(outcome.fields)) {
+        if (fieldAuthority === 'effect') base[field] = SHAPE_PROBE_COMMIT;
+        else if (fieldAuthority !== 'semantic') base[field] = SHAPE_PROBE_TEXT;
+      }
+      const admits = (values: Readonly<Record<string, JsonValue>>): boolean => {
+        try {
+          const transitions = machine.getTransitionData(snapshot as never, {
+            type: `xstate.done.actor.${invokeId}`,
+            output: { ...base, ...values },
+            actorId: invokeId,
+          } as never);
+          return transitions.some((transition) =>
+            (transition.actions as readonly unknown[]).some((action) =>
+              isAcceptedOutcomeMarker(action, stateId, guard),
+            ),
+          );
+        } catch {
+          return false;
+        }
+      };
+      for (const combination of shapeCombinations(semanticFields.length)) {
+        const values: Record<string, JsonValue> = {};
+        semanticFields.forEach((field, index) => {
+          values[field] = SEMANTIC_SHAPE_SAMPLES[combination[index]!]![1];
+        });
+        if (!admits(values)) continue;
+        const shapes: Record<string, PlaybookSemanticValueShape> = {};
+        semanticFields.forEach((field, index) => {
+          let shape = SEMANTIC_SHAPE_SAMPLES[combination[index]!]![0];
+          if (shape === 'string-array' && admits({ ...values, [field]: [1] })) {
+            shape = 'string-or-number-array';
+          }
+          if (shape !== 'string') shapes[field] = shape;
+        });
+        if (Object.keys(shapes).length > 0) {
+          stateShapes[guard] = Object.freeze(shapes);
+        }
+        break;
+      }
+    }
+    if (Object.keys(stateShapes).length > 0) {
+      shapesByState.set(stateId, Object.freeze(stateShapes));
+    }
+  }
+  return shapesByState;
+}
+
 function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
   if (left.length !== right.length) return false;
   const expected = new Set(right);
@@ -4010,6 +4291,10 @@ export function createXStatePlaybookRuntime<
     roleStates,
     verbatimPayloadFields,
   );
+  const semanticValueShapes = inferSemanticValueShapes(
+    machine,
+    outcomeAuthority,
+  );
   for (const [stateId, outcomes] of Object.entries(
     outcomeAuthority.governedPlayerStates,
   )) {
@@ -4584,6 +4869,7 @@ export function createXStatePlaybookRuntime<
           semanticCandidate: candidate.semanticCandidate,
           finalText: candidate.finalText,
           receipt,
+          semanticValueShapes: semanticValueShapes.get(candidate.sourceStateId),
         });
         if (
           awaitingLogicalReceipt &&
@@ -5814,7 +6100,13 @@ export function createXStatePlaybookRuntime<
         raw = await boundary.callJudge(
           'player-output-adjudication',
           input.stateId,
-          buildGovernedJudgePrompt(input, finalText, outcomes),
+          buildGovernedJudgePrompt(
+            input,
+            finalText,
+            outcomes,
+            undefined,
+            semanticValueShapes.get(input.stateId),
+          ),
           signal,
         );
       } catch (error) {
@@ -5857,6 +6149,7 @@ export function createXStatePlaybookRuntime<
           semanticCandidate: candidate,
           finalText,
           receipt: completion.outcomeReceipt,
+          semanticValueShapes: semanticValueShapes.get(input.stateId),
         });
       } catch (error) {
         if (!(error instanceof PlaybookSemanticCandidateStructureError)) {
@@ -5903,10 +6196,16 @@ export function createXStatePlaybookRuntime<
           correctiveRaw = await boundary.callJudge(
             'player-output-adjudication',
             input.stateId,
-            buildGovernedJudgePrompt(input, finalText, outcomes, {
-              reply: raw,
-              error: structuralError.message,
-            }),
+            buildGovernedJudgePrompt(
+              input,
+              finalText,
+              outcomes,
+              {
+                reply: raw,
+                error: structuralError.message,
+              },
+              semanticValueShapes.get(input.stateId),
+            ),
             signal,
           );
         } catch (error) {
@@ -5928,6 +6227,7 @@ export function createXStatePlaybookRuntime<
             semanticCandidate: candidate,
             finalText,
             receipt: completion.outcomeReceipt,
+            semanticValueShapes: semanticValueShapes.get(input.stateId),
           });
         } catch (error) {
           if (!(error instanceof PlaybookSemanticCandidateStructureError)) {
@@ -6468,7 +6768,13 @@ export function createXStatePlaybookRuntime<
           await boundary.callJudge(
             'player-output-adjudication',
             saved.sourceStateId,
-            buildGovernedJudgePrompt(actorInput, saved.finalText!, outcomes),
+            buildGovernedJudgePrompt(
+              actorInput,
+              saved.finalText!,
+              outcomes,
+              undefined,
+              semanticValueShapes.get(saved.sourceStateId),
+            ),
             signal,
           ),
         );
@@ -6477,6 +6783,7 @@ export function createXStatePlaybookRuntime<
         semanticCandidate: candidate,
         finalText: saved.finalText,
         receipt: saved.physicalReceipt,
+        semanticValueShapes: semanticValueShapes.get(saved.sourceStateId),
       });
       signal.throwIfAborted();
       const next = {
@@ -7958,12 +8265,59 @@ export function createXStatePlaybookRuntime<
               judgePrompt,
               active,
             );
-            const output = adjudicateCaptainOutput(
-              extractFields,
-              input,
-              finalText,
-              raw,
-            );
+            let output: PlaybookActorOutput;
+            try {
+              output = adjudicateCaptainOutput(
+                extractFields,
+                input,
+                finalText,
+                raw,
+              );
+            } catch (error) {
+              if (!(error instanceof CaptainAdjudicationStructureError)) {
+                throw error;
+              }
+              // DR-089: one corrective adjudication over the same visible
+              // output, restating the reply and its validation error; an
+              // abort before it begins starts none.
+              active.throwIfAborted();
+              const correctiveRaw = await boundary.callJudge(
+                'captain-output-adjudication',
+                input.stateId,
+                defaultBuildCaptainJudgePrompt(input, finalText, {
+                  reply: raw,
+                  error: error.message,
+                }),
+                active,
+              );
+              try {
+                output = adjudicateCaptainOutput(
+                  extractFields,
+                  input,
+                  finalText,
+                  correctiveRaw,
+                );
+              } catch (corrective) {
+                if (!(corrective instanceof CaptainAdjudicationStructureError)) {
+                  throw corrective;
+                }
+                // A second invalid reply parks the step for Boss as a
+                // decided adjudication failure, never a control-plane error.
+                const failure = markFsmResultFailure(
+                  new Error(
+                    `${label} Captain outcome stayed undecided: ${corrective.message}`,
+                  ),
+                );
+                const cause = governedSettlementCause(
+                  'corrective semantic candidate is invalid',
+                  undefined,
+                  false,
+                  undefined,
+                );
+                failureCauses.retain(failure, cause);
+                throw attachPlaybookFailureCause(failure, cause);
+              }
+            }
             validateBossReplyOutput(input, output, resumableStateIds);
             return output;
           } catch (error) {
