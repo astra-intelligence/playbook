@@ -976,27 +976,43 @@ async function isAncestor(worktree, baselineHead, afterHead) {
   }
 }
 
-async function descendantCount(worktree, baselineHead, afterHead) {
-  const value = await runGitText(worktree, [
+// DR-088 §1: the commits reachable from the after HEAD and not from the
+// baseline HEAD — every reachable commit for the null HEAD — oldest first, so
+// the last is the after HEAD itself.
+async function newCommits(worktree, baselineHead, afterHead) {
+  const raw = await runGitText(worktree, [
     'rev-list',
-    '--count',
+    '--topo-order',
+    '--reverse',
     baselineHead === NULL_GIT_OID ? afterHead : `${baselineHead}..${afterHead}`,
   ]);
-  const count = Number(value);
-  if (!Number.isSafeInteger(count) || count < 0) {
+  const commits = raw.length === 0 ? [] : raw.split('\n');
+  if (
+    commits.some((oid) => !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(oid)) ||
+    new Set(commits).size !== commits.length ||
+    (commits.length > 0 && commits.at(-1) !== afterHead)
+  ) {
     throw new RepositoryObservationAmbiguousError(
-      'Git returned an invalid descendant count',
+      'Git returned an invalid list of new commits',
     );
   }
-  return count;
+  return commits;
 }
 
-function receipt(classification, baseline, after, commitOid, preExisting) {
+function receipt(
+  classification,
+  baseline,
+  after,
+  commitOid,
+  preExisting,
+  commits,
+) {
   return deepFreeze({
     classification,
     baseline,
     ...(after === undefined ? {} : { after }),
     ...(commitOid === undefined ? {} : { commitOid }),
+    ...(commits === undefined ? {} : { commits }),
     ...(preExisting === undefined ? {} : { preExisting }),
   });
 }
@@ -1049,12 +1065,13 @@ export async function classifyRepositoryReceipt(
   ) {
     return receipt('rewritten-or-non-descendant', baseline, after);
   }
-  const count = await descendantCount(after.worktree, baseline.head, after.head);
-  if (count > 1) return receipt('multiple-commits', baseline, after);
-  if (count !== 1) {
+  // DR-088 §1: HEAD advanced by one or more new commits; a receipt of more
+  // than one lists every one, oldest first.
+  const commits = await newCommits(after.worktree, baseline.head, after.head);
+  if (commits.length === 0) {
     return receipt('rewritten-or-non-descendant', baseline, after);
   }
-  // DR-062 §2: the one commit proves itself when every baseline entry is
+  // DR-062 §2: the advance proves itself when every baseline entry is
   // preserved, absorbed, or altered and carried by it, and the after
   // projection holds nothing else.
   const fates = await baselineEntryFates(baseline, after);
@@ -1071,6 +1088,7 @@ export async function classifyRepositoryReceipt(
     after,
     unattributable ? undefined : after.head,
     preExistingFromFates(fates),
+    unattributable || commits.length === 1 ? undefined : commits,
   );
 }
 

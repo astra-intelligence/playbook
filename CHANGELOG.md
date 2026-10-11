@@ -21,6 +21,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([[playbook-runtime-34](specs/packages/playbook-runtime.md#playbook-runtime-34)],
   [[playbook-runtime-48](specs/packages/playbook-runtime.md#playbook-runtime-48)]).
 
+### Changed
+
+- **A commit outcome takes every new commit, or the commit already at HEAD.**
+  A step that must commit now reconciles when HEAD advanced by one or more
+  new commits: its `one-descendant-commit` receipt carries the last as
+  `commitOid` and, for more than one, a `commits` list of every one, oldest
+  first, which the Boss's reply lists. A step that changed nothing reconciles
+  as already at HEAD when its final text names that commit by its full OID
+  or a seven-digit abbreviation and its call declares no `unchanged`
+  outcome; the reply says it made no new commit. Rewritten history,
+  residual changes, and every other movement still fail. An earlier
+  Playbook rejects a ledger whose receipt carries `commits`, so hosts
+  sharing a session store upgrade together
+  ([DR-088](specs/decisions/088-a-commit-outcome-takes-every-new-commit.md),
+  [[playbook-runtime-67](specs/packages/playbook-runtime.md#playbook-runtime-67)],
+  [[playbook-runtime-77](specs/packages/playbook-runtime.md#playbook-runtime-77)],
+  [[playbook-captain-83](specs/packages/playbook-captain.md#playbook-captain-83)]).
+
 ### Fixed
 
 - **A judge is no longer asked for a shape the compiled machine refuses.**

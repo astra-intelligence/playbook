@@ -341,6 +341,7 @@ interface PlaybookRepositoryReceipt {
   readonly baseline: PlaybookRepositoryObservation;
   readonly after?: PlaybookRepositoryObservation;
   readonly commitOid?: string;
+  readonly commits?: readonly string[];
 }
 
 type PlaybookRepositoryDisposition =
@@ -1326,10 +1327,16 @@ physical receipt, or the complete cumulative logical receipt of a deferred
 operation, whose classification is exactly the outcome's declared
 `unchanged` or `one-descendant-commit` disposition; a `one-descendant-commit`
 receipt shall carry exactly the after-HEAD OID used for the arm's effect-owned
-fields, while an `unchanged` receipt's complete validated observation supplies
-its observed HEAD OID for them, and a receipt that cannot prove that observed
-HEAD shall leave the envelope unresolved rather than inject a fabricated
-value.
+fields, and lists every new commit in `commits` where HEAD advanced by more
+than one, while an `unchanged` receipt's complete validated observation
+supplies its observed HEAD OID for them, and a receipt that cannot prove that
+observed HEAD shall leave the envelope unresolved rather than inject a
+fabricated value.
+A `one-descendant-commit` outcome shall also resolve over an `unchanged`
+receipt whose HEAD names a commit when no outcome of that call declares
+`unchanged` and the trimmed `finalText` names that commit as a word, by its
+full OID or an abbreviation of at least seven leading hex digits; its
+effect-owned fields then take that HEAD OID.
 A `deferred` candidate shall be admissible only for its already-validated
 effect-authorized `needsBossReply` outcome and only from a complete after
 observation whose HEAD equals the logical operation's original baseline HEAD

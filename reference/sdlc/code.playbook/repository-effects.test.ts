@@ -427,18 +427,21 @@ describe('repository-relevant Git observations (PBRT-68)', () => {
     expect(committed.classification).toBe('one-descendant-commit');
     expect(committed.commitOid).toBe(rootCommit);
     expect(committed.after?.head).toBe(rootCommit);
-    // The null baseline is never "not an ancestor": only the commit count and
-    // the projection decide, so a second root-descended commit is multiple.
+    // The null baseline is never "not an ancestor": every reachable commit is
+    // new, so a second root-descended commit lists both (DR-088 §1).
     await writeFile(join(repo, 'second.txt'), 'second\n', 'utf8');
     await git(repo, 'add', '--all');
     await git(repo, 'commit', '--quiet', '-m', 'second');
-    expect(
-      (
-        await captureRepositoryReceipt(unborn, {
-          allowedDispositions: ['one-descendant-commit'],
-        })
-      ).classification,
-    ).toBe('multiple-commits');
+    const secondCommit = await git(repo, 'rev-parse', 'HEAD');
+    await expect(
+      captureRepositoryReceipt(unborn, {
+        allowedDispositions: ['one-descendant-commit'],
+      }),
+    ).resolves.toMatchObject({
+      classification: 'one-descendant-commit',
+      commitOid: secondCommit,
+      commits: [rootCommit, secondCommit],
+    });
   });
 
   it('fails closed instead of collapsing a non-UTF-8 Git path', async () => {
@@ -630,7 +633,7 @@ describe('repository-relevant Git observations (PBRT-68)', () => {
     }
   });
 
-  it('accounts for altered and consumed overlays and fails closed on residual changes, multiple commits, and rewritten history', async () => {
+  it('accounts for altered and consumed overlays, lists every new commit, and fails closed on residual changes and rewritten history', async () => {
     const alteredRepo = await initRepository('playbook-effects-altered-');
     await writeFile(join(alteredRepo, 'base.txt'), 'first overlay\n', 'utf8');
     const alteredBaseline = await observeGitRepository(alteredRepo);
@@ -672,16 +675,34 @@ describe('repository-relevant Git observations (PBRT-68)', () => {
       }),
     ).resolves.toMatchObject({ classification: 'observation-ambiguous' });
 
+    // DR-088 §1: HEAD advanced by two new commits proves the commit outcome
+    // and lists both, oldest first, ending at the commit OID.
     const multipleRepo = await initRepository('playbook-effects-multiple-');
     const multipleBaseline = await observeGitRepository(multipleRepo);
-    await commitFile(multipleRepo, 'one.txt', 'one\n', 'one');
-    await commitFile(multipleRepo, 'two.txt', 'two\n', 'two');
+    const firstCommit = await commitFile(multipleRepo, 'one.txt', 'one\n', 'one');
+    const secondCommit = await commitFile(multipleRepo, 'two.txt', 'two\n', 'two');
     const multipleAfter = await observeGitRepository(multipleRepo);
-    await expect(
-      classifyRepositoryReceipt(multipleBaseline, multipleAfter, {
-        allowedDispositions: ['one-descendant-commit'],
-      }),
-    ).resolves.toMatchObject({ classification: 'multiple-commits' });
+    const multiple = await classifyRepositoryReceipt(
+      multipleBaseline,
+      multipleAfter,
+      { allowedDispositions: ['one-descendant-commit'] },
+    );
+    expect(multiple).toMatchObject({
+      classification: 'one-descendant-commit',
+      commitOid: secondCommit,
+      commits: [firstCommit, secondCommit],
+    });
+    expect(multiple).not.toHaveProperty('preExisting');
+    // A residual beside two commits stays as ambiguous as beside one.
+    await writeFile(join(multipleRepo, 'residual.txt'), 'residual\n', 'utf8');
+    const multipleResidual = await classifyRepositoryReceipt(
+      multipleBaseline,
+      await observeGitRepository(multipleRepo),
+      { allowedDispositions: ['one-descendant-commit'] },
+    );
+    expect(multipleResidual.classification).toBe('observation-ambiguous');
+    expect(multipleResidual).not.toHaveProperty('commitOid');
+    expect(multipleResidual).not.toHaveProperty('commits');
 
     const rewrittenRepo = await initRepository('playbook-effects-rewritten-');
     const rewrittenBaseline = await observeGitRepository(rewrittenRepo);

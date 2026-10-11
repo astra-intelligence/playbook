@@ -1615,6 +1615,181 @@ describe('semantic outcome reconciliation', () => {
     });
   });
 
+  // DR-088 §1: a receipt listing several new commits proves a commit outcome
+  // with its last commit, and against an arm that must leave the repository
+  // unchanged it reads as more than one commit.
+  it('takes a receipt of several new commits as the commit outcome', () => {
+    const [first, second] = ['2'.repeat(40), '3'.repeat(40)];
+    const receipt = {
+      classification: 'one-descendant-commit',
+      baseline: EFFECT_BASELINE,
+      after: { ...EFFECT_BASELINE, head: second },
+      commitOid: second,
+      commits: [first, second],
+    } as const;
+    expect(
+      reconcilePlaybookSemanticEvidence({
+        outcomes,
+        semanticCandidate: { guard: 'committed', irTask: 'task 9' },
+        finalText: 'Committed twice.',
+        receipt,
+      }),
+    ).toMatchObject({
+      status: 'resolved',
+      output: { guard: 'committed', latestCommit: second },
+    });
+    expect(
+      reconcilePlaybookSemanticEvidence({
+        outcomes,
+        semanticCandidate: { guard: 'complete', irNumber: '048' },
+        finalText: 'Complete.',
+        receipt,
+        runtimeFields: { settledBy: 'runtime-transition' },
+      }),
+    ).toMatchObject({
+      status: 'unresolved',
+      reason: 'repository-disposition-mismatch',
+      cause: {
+        code: 'commits-more-than-one',
+        evidence: {
+          required: 'unchanged',
+          observed: 'multiple-commits',
+          baselineHead: '1'.repeat(40),
+          afterHead: second,
+        },
+      },
+    });
+  });
+
+  it.each([
+    ['a single commit', ['3'.repeat(40)]],
+    ['a list not ending at the commit OID', ['3'.repeat(40), '2'.repeat(40)]],
+    ['a repeated commit', ['2'.repeat(40), '2'.repeat(40), '3'.repeat(40)]],
+    ['the baseline HEAD', ['1'.repeat(40), '3'.repeat(40)]],
+    ['a malformed OID', ['2'.repeat(39), '3'.repeat(40)]],
+  ] as const)('rejects a commit list holding %s', (_label, commits) => {
+    const head = '3'.repeat(40);
+    expect(
+      reconcilePlaybookSemanticEvidence({
+        outcomes,
+        semanticCandidate: { guard: 'committed', irTask: 'task 9' },
+        finalText: 'Committed.',
+        receipt: {
+          classification: 'one-descendant-commit',
+          baseline: EFFECT_BASELINE,
+          after: { ...EFFECT_BASELINE, head },
+          commitOid: head,
+          commits,
+        },
+      }),
+    ).toMatchObject({ status: 'unresolved', reason: 'invalid-repository-receipt' });
+  });
+
+  it('rejects a commit list on any receipt but one-descendant-commit', () => {
+    expect(
+      reconcilePlaybookSemanticEvidence({
+        outcomes,
+        semanticCandidate: { guard: 'committed', irTask: 'task 9' },
+        finalText: `Kept ${'1'.repeat(40)}.`,
+        receipt: {
+          ...unchangedReceipt,
+          commits: ['2'.repeat(40), '1'.repeat(40)],
+        },
+      }),
+    ).toMatchObject({ status: 'unresolved', reason: 'invalid-repository-receipt' });
+  });
+
+  // DR-088 §2: over an unchanged receipt, a commit arm of a call that
+  // declares no unchanged outcome takes the commit already at HEAD exactly
+  // when the final text names it as a word.
+  describe('the commit already at HEAD', () => {
+    const head = `dfe4e73${'a'.repeat(33)}`;
+    const atHead = effectObservation({}, head);
+    const unchangedAtHead = {
+      classification: 'unchanged',
+      baseline: atHead,
+      after: atHead,
+    } as const;
+    const commitOrAsk = {
+      committed: outcomes.committed,
+      needsBossReply: outcomes.needsBossReply,
+    } as const;
+    const reconcileWith = (
+      finalText: string,
+      receipt: unknown = unchangedAtHead,
+      declared: typeof outcomes | typeof commitOrAsk = commitOrAsk,
+    ) =>
+      reconcilePlaybookSemanticEvidence({
+        outcomes: declared,
+        semanticCandidate: { guard: 'committed', irTask: 'task 9' },
+        finalText,
+        receipt,
+      });
+
+    it.each([
+      ['its full OID', `The design was already committed as ${head}.`],
+      ['a seven-digit abbreviation', `Kept \`${head.slice(0, 7)}\` as committed.`],
+      ['an uppercase abbreviation', `Kept ${head.slice(0, 12).toUpperCase()}.`],
+    ])('resolves when the final text names %s', (_label, finalText) => {
+      expect(reconcileWith(finalText)).toMatchObject({
+        status: 'resolved',
+        output: { guard: 'committed', irTask: 'task 9', latestCommit: head },
+      });
+    });
+
+    it.each([
+      ['no commit', 'Kept the earlier commit as it is.'],
+      ['six digits', `Kept ${head.slice(0, 6)}.`],
+      ['digits inside a longer word', `Kept x${head.slice(0, 7)}.`],
+      ['another commit', `Kept ${'9'.repeat(40)}.`],
+    ])('keeps commit-missing when the final text names %s', (_label, finalText) => {
+      expect(reconcileWith(finalText)).toMatchObject({
+        status: 'unresolved',
+        reason: 'repository-disposition-mismatch',
+        cause: {
+          code: 'commit-missing',
+          evidence: { required: 'one-descendant-commit', observed: 'unchanged' },
+        },
+      });
+    });
+
+    it('keeps commit-missing where the call declares an unchanged outcome', () => {
+      expect(
+        reconcileWith(`Already committed as ${head}.`, unchangedAtHead, outcomes),
+      ).toMatchObject({ status: 'unresolved', cause: { code: 'commit-missing' } });
+    });
+
+    it('keeps commit-missing beside uncommitted changes', () => {
+      expect(
+        reconcileWith(`Already committed as ${head}.`, {
+          classification: 'worktree-only-change',
+          baseline: atHead,
+          after: effectObservation(
+            { 'draft.md': { kind: 'untracked', identity: 'sha256:draft' } },
+            head,
+          ),
+        }),
+      ).toMatchObject({
+        status: 'unresolved',
+        cause: {
+          code: 'commit-missing',
+          evidence: { paths: { uncommitted: ['draft.md'] } },
+        },
+      });
+    });
+
+    it('keeps commit-missing over an unborn HEAD', () => {
+      const unborn = effectObservation({}, '0'.repeat(40));
+      expect(
+        reconcileWith(`Nothing yet at ${'0'.repeat(7)}.`, {
+          classification: 'unchanged',
+          baseline: unborn,
+          after: unborn,
+        }),
+      ).toMatchObject({ status: 'unresolved', cause: { code: 'commit-missing' } });
+    });
+  });
+
   it.each([
     ['unchanged', unchangedReceipt],
     [

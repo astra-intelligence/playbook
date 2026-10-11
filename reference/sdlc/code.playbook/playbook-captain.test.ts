@@ -838,6 +838,92 @@ function committedBeforeFailureTestLedger(
   });
 }
 
+// DR-088 §3: completed steps whose commit outcome took several new commits
+// or the commit already at HEAD, beside two unchanged steps that say nothing:
+// one whose call declares an unchanged outcome and one naming no commit.
+const STEP_FIRST_COMMIT = 'c1'.repeat(20);
+const STEP_LAST_COMMIT = 'e2'.repeat(20);
+
+function stepCommitTestLedger(playbookId: string, runtimeSessionId: string) {
+  const observation = (head: string) => ({
+    worktree: '/current/worktree',
+    gitDir: '/current/worktree/.git',
+    head,
+    projection: {},
+    projectionDigest:
+      'sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a',
+  });
+  const base = observation(UNRESOLVED_EFFECT_BASELINE_HEAD);
+  const atHead = observation(STEP_LAST_COMMIT);
+  const unchanged = { classification: 'unchanged', baseline: atHead, after: atHead };
+  const rows = [
+    {
+      dispositions: ['one-descendant-commit', 'deferred'],
+      baseline: base,
+      after: atHead,
+      physicalReceipt: {
+        classification: 'one-descendant-commit',
+        baseline: base,
+        after: atHead,
+        commitOid: STEP_LAST_COMMIT,
+        commits: [STEP_FIRST_COMMIT, STEP_LAST_COMMIT],
+      },
+      guard: 'committed',
+      finalText: 'Committed the tests, then the audit fixes.',
+    },
+    {
+      dispositions: ['one-descendant-commit', 'deferred'],
+      baseline: atHead,
+      after: atHead,
+      physicalReceipt: unchanged,
+      guard: 'committed',
+      finalText: `The design was already committed as ${STEP_LAST_COMMIT.slice(0, 7)}.`,
+    },
+    {
+      dispositions: ['one-descendant-commit', 'unchanged', 'deferred'],
+      baseline: atHead,
+      after: atHead,
+      physicalReceipt: unchanged,
+      guard: 'rejectedAll',
+      finalText: `Rejected every finding at ${STEP_LAST_COMMIT}.`,
+    },
+    {
+      dispositions: ['one-descendant-commit', 'deferred'],
+      baseline: atHead,
+      after: atHead,
+      physicalReceipt: unchanged,
+      guard: 'committed',
+      finalText: 'Kept the earlier commit as it is.',
+    },
+  ];
+  return assertPlaybookEffectLedger({
+    schemaVersion: 1,
+    revision: 1,
+    boundaries: rows.map((row, index) => ({
+      sequence: index + 1,
+      boundaryId: `9c000000-0000-4000-8000-00000000000${index + 1}`,
+      attemptId: '9d000000-0000-4000-8000-000000000001',
+      attemptNumber: 1,
+      playbookId,
+      runtimeSessionId,
+      turnId: 1,
+      callId: `${playbookId}:coder:step-${index + 1}`,
+      roleId: 'coder',
+      sourceStateId: 'working',
+      sourceOutcomeSchema: { committed: {} },
+      dispositions: row.dispositions,
+      canonicalWorktree: { worktree: base.worktree, gitDir: base.gitDir },
+      baseline: row.baseline,
+      after: row.after,
+      physicalReceipt: row.physicalReceipt,
+      finalText: row.finalText,
+      semanticCandidate: { guard: row.guard },
+      correctionBudget: { limit: 1, spent: false },
+    })),
+    logicalOperations: [],
+  });
+}
+
 /**
  * One standalone boundary per unresolved-effect classification, each with
  * the HEAD evidence its report form needs: a proven commit, a move, a stay,
@@ -3883,6 +3969,167 @@ describe('createPlaybookCaptainShell lifecycle and telemetry (CAPTAIN-11/14)', (
     ).toHaveLength(2);
     expect(JSON.stringify(settlement)).not.toContain(
       'changes that were uncommitted before the step',
+    );
+    await shell.dispose?.();
+  });
+
+  it('reports every new commit and the commit already at HEAD each step took (DR-088)', async () => {
+    const rootSessionId = '21000000-0000-4000-8000-000000000042';
+    const settled = stepCommitTestLedger('code', rootSessionId);
+    let current = emptyPlaybookEffectLedger();
+    const registry = fakeCodeEntry(async (runtime) => {
+      current = settled;
+      runtime.snapshot = runtimeSnapshot(
+        'code',
+        playbookState('editing'),
+        { turn: 1, effectLedger: settled },
+      );
+      return quiescentResult('editing');
+    });
+    const capabilities: PlaybookHostConstructionCapabilities = {
+      ...fakeHostCapabilities(registry.entry, 'step-commit-lease'),
+      effectLedger: {
+        snapshot: vi.fn(() => current),
+        writeAhead: vi.fn(async () => current),
+      },
+    };
+    const shell = makeShell(registry, {
+      sessionIds: [rootSessionId],
+      hostCapabilities: { code: capabilities },
+    });
+
+    await shell.init!(stubSession().session);
+    const context = stubContext();
+    await shell.handleBossTurn(turn('/code commit the work'), context.context);
+
+    expect(context.replies).toHaveLength(1);
+    const reply = context.replies[0]!;
+    const statements = [
+      `The step made 2 new commits, oldest first: ${STEP_FIRST_COMMIT}, ${STEP_LAST_COMMIT}.`,
+      `The step made no new commit; it named ${STEP_LAST_COMMIT}, already at HEAD, as its work.`,
+    ];
+    expect(reply).toContain(statements.join('\n'));
+    expect(reply.split('already at HEAD')).toHaveLength(2);
+    // The closing-reply prompt reads the same statements as settlement facts.
+    for (const statement of statements) {
+      expect(
+        context.captainCalls.some(({ prompt }) => prompt.includes(statement)),
+      ).toBe(true);
+    }
+    expect(shell.exportSettlement()?.unresolvedEffects).toEqual([]);
+    await shell.dispose?.();
+  });
+
+  it('names an unresolved step of several new commits as more than one commit (DR-088)', async () => {
+    const rootSessionId = '21000000-0000-4000-8000-000000000043';
+    const ledger = stepCommitTestLedger('code', rootSessionId);
+    const references = [
+      { kind: 'boundary' as const, boundaryId: ledger.boundaries[0]!.boundaryId },
+    ];
+    const registry = fakeCodeEntry(async (runtime) => {
+      runtime.snapshot = runtimeSnapshot(
+        'code',
+        playbookState('effectReconciliationRequired'),
+        { turn: 1, effectLedger: ledger },
+      );
+      return quiescentResult('effectReconciliationRequired');
+    });
+    const createRuntime = registry.entry.createRuntime as unknown as
+      PlaybookCaptainRegistryEntryV3['createRuntime'];
+    registry.entry.createRuntime = ((options, hostCapabilities) => {
+      const runtime = createRuntime(options, hostCapabilities) as FakeRuntime;
+      runtime.unresolvedEffectEnvelopes = () => references;
+      return runtime;
+    }) as typeof registry.entry.createRuntime;
+    const capabilities: PlaybookHostConstructionCapabilities = {
+      ...fakeHostCapabilities(registry.entry, 'step-commit-unresolved-lease'),
+      effectLedger: {
+        snapshot: vi.fn(() => ledger),
+        writeAhead: vi.fn(async () => ledger),
+      },
+    };
+    const shell = makeShell(registry, {
+      sessionIds: [rootSessionId],
+      hostCapabilities: { code: capabilities },
+    });
+    await shell.init!(stubSession().session);
+    const context = stubContext();
+    await shell.handleBossTurn(turn('/code commit twice'), context.context);
+
+    expect(shell.exportSettlement()?.unresolvedEffects).toEqual([
+      {
+        classification: 'multiple-commits',
+        baselineHead: UNRESOLVED_EFFECT_BASELINE_HEAD,
+        afterHead: STEP_LAST_COMMIT,
+      },
+    ]);
+    expect(context.replies[0]).toContain(
+      `1. Observed repository change: the step made more than one commit; HEAD moved from ${UNRESOLVED_EFFECT_BASELINE_HEAD} to ${STEP_LAST_COMMIT}.`,
+    );
+    await shell.dispose?.();
+  });
+
+  it('names an open chain of several new commits as more than one commit (DR-088)', async () => {
+    const rootSessionId = '21000000-0000-4000-8000-000000000044';
+    const absorbed = absorbedOpenLogicalUnresolvedEffectTestLedger(
+      'code',
+      rootSessionId,
+    );
+    const firstCommit = 'f'.repeat(40);
+    const ledger = assertPlaybookEffectLedger({
+      ...absorbed.ledger,
+      boundaries: absorbed.ledger.boundaries.map((boundary) =>
+        boundary.physicalReceipt?.classification === 'one-descendant-commit'
+          ? {
+              ...boundary,
+              physicalReceipt: {
+                ...boundary.physicalReceipt,
+                commits: [firstCommit, UNRESOLVED_EFFECT_AFTER_HEAD],
+              },
+            }
+          : boundary,
+      ),
+    });
+    const references = absorbed.references.slice(0, 1);
+    const registry = fakeCodeEntry(async (runtime) => {
+      runtime.snapshot = runtimeSnapshot(
+        'code',
+        playbookState('effectReconciliationRequired'),
+        { turn: 1, effectLedger: ledger },
+      );
+      return quiescentResult('effectReconciliationRequired');
+    });
+    const createRuntime = registry.entry.createRuntime as unknown as
+      PlaybookCaptainRegistryEntryV3['createRuntime'];
+    registry.entry.createRuntime = ((options, hostCapabilities) => {
+      const runtime = createRuntime(options, hostCapabilities) as FakeRuntime;
+      runtime.unresolvedEffectEnvelopes = () => references;
+      return runtime;
+    }) as typeof registry.entry.createRuntime;
+    const capabilities: PlaybookHostConstructionCapabilities = {
+      ...fakeHostCapabilities(registry.entry, 'step-commit-chain-lease'),
+      effectLedger: {
+        snapshot: vi.fn(() => ledger),
+        writeAhead: vi.fn(async () => ledger),
+      },
+    };
+    const shell = makeShell(registry, {
+      sessionIds: [rootSessionId],
+      hostCapabilities: { code: capabilities },
+    });
+    await shell.init!(stubSession().session);
+    const context = stubContext();
+    await shell.handleBossTurn(turn('/code answer and commit twice'), context.context);
+
+    expect(shell.exportSettlement()?.unresolvedEffects).toEqual([
+      {
+        classification: 'multiple-commits',
+        baselineHead: UNRESOLVED_EFFECT_BASELINE_HEAD,
+        afterHead: UNRESOLVED_EFFECT_AFTER_HEAD,
+      },
+    ]);
+    expect(context.replies[0]).toContain(
+      `1. Observed repository change: the step made more than one commit; HEAD moved from ${UNRESOLVED_EFFECT_BASELINE_HEAD} to ${UNRESOLVED_EFFECT_AFTER_HEAD}.`,
     );
     await shell.dispose?.();
   });

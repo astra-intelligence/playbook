@@ -255,6 +255,12 @@ export interface PlaybookRepositoryReceipt {
     readonly baseline: PlaybookRepositoryObservation;
     readonly after?: PlaybookRepositoryObservation;
     readonly commitOid?: string;
+    /**
+     * Every new commit, oldest first and ending at `commitOid`, present exactly
+     * when a `one-descendant-commit` receipt's HEAD advanced by more than one
+     * (DR-088).
+     */
+    readonly commits?: readonly string[];
     readonly preExisting?: PlaybookRepositoryPreExistingChanges;
 }
 /** One durably ordered physical governed-player boundary (DR-040). */
