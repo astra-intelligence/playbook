@@ -40,7 +40,8 @@ The three dispositions, the exclusive claim, the cohort and exclusively-`unchang
    Uncommitted changes, a different named commit, or an unborn HEAD keep the existing `commit-missing` failure.
 3. **The Boss sees every commit.**
    Beside [DR-062](062-pre-existing-changes-are-context.md) §5's report, each presented reply states, for each step completed since the last one presented, the new commits when more than one, oldest first, and, for a step reconciled by a named HEAD, that it made no new commit and named the commit already at HEAD.
-   An unresolved-effect entry or failure cause over a receipt listing more than one commit reads as `multiple-commits` and `commits-more-than-one`, so their existing phrases stay exact; no Boss-facing phrase changes.
+   The report of the commits a failed turn made ([DR-089](089-judge-replies-take-the-machines-shapes.md) §3) lists them the same way.
+   An unresolved-effect entry or failure cause over a receipt listing more than one commit reads as `multiple-commits` and `commits-more-than-one`, so their existing phrases stay exact, and the failed-turn report does not restate a receipt such an entry already names.
 4. **Uncommitted work is not an outcome (non-goal).**
    A step ending "working tree changed, uncommitted" needs more than a classification:
    - a fourth disposition in the closed schema-3 set that the linker derives and every compiled artifact and registry validates;
