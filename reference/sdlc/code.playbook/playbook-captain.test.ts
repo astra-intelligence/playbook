@@ -786,10 +786,14 @@ function carriedPreExistingTestLedger(
 const COMMITTED_BEFORE_FAILURE_OID = 'e'.repeat(40);
 
 // DR-089: one completed boundary whose receipt proves one new commit that the
-// turn's later failure leaves standing, outside any unresolved envelope.
+// turn's later failure leaves standing, outside any unresolved envelope — or,
+// with `commits`, several new commits listed oldest first (DR-088).
+const COMMITTED_BEFORE_FAILURE_FIRST_OID = 'd1'.repeat(20);
+
 function committedBeforeFailureTestLedger(
   playbookId: string,
   runtimeSessionId: string,
+  commits?: readonly string[],
 ) {
   const baseline = {
     worktree: '/current/worktree',
@@ -828,6 +832,7 @@ function committedBeforeFailureTestLedger(
           baseline,
           after,
           commitOid: after.head,
+          ...(commits === undefined ? {} : { commits }),
         },
         finalText: 'Committed the four intent records.',
         semanticCandidate: { guard: 'committed' },
@@ -14189,12 +14194,40 @@ describe('host-published runtime actions (CAPTAIN-60, CAPTAIN-7)', () => {
     await shell.dispose?.();
   });
 
-  it('states as fact the commit a turn proved before its leaf parked (DR-089)', async () => {
+  it.each([
+    [
+      'one commit',
+      undefined,
+      false,
+      'made one new commit',
+    ],
+    [
+      'two commits, listed oldest first (DR-088)',
+      [COMMITTED_BEFORE_FAILURE_FIRST_OID, COMMITTED_BEFORE_FAILURE_OID],
+      false,
+      `made 2 new commits, oldest first: ${COMMITTED_BEFORE_FAILURE_FIRST_OID}, ${COMMITTED_BEFORE_FAILURE_OID}`,
+    ],
+    [
+      'two commits an unresolved entry already names (DR-088)',
+      [COMMITTED_BEFORE_FAILURE_FIRST_OID, COMMITTED_BEFORE_FAILURE_OID],
+      true,
+      undefined,
+    ],
+  ] as const)('states as fact the commits a turn proved before its leaf parked: %s (DR-089)', async (
+    _label,
+    commits,
+    unresolved,
+    made,
+  ) => {
     // W-23: the step committed, the run then failed, and the closing reply
-    // told the Boss nothing was written. The receipt's commit now joins the
+    // told the Boss nothing was written. The receipt's commits now join the
     // settlement facts and the Boss-visible report beside the failure.
     const rootSessionId = '21000000-0000-4000-8000-0000000000a8';
-    const committed = committedBeforeFailureTestLedger('code', rootSessionId);
+    const committed = committedBeforeFailureTestLedger(
+      'code',
+      rootSessionId,
+      commits,
+    );
     let current = emptyPlaybookEffectLedger();
     let parked = false;
     const malformed = {
@@ -14229,6 +14262,12 @@ describe('host-published runtime actions (CAPTAIN-60, CAPTAIN-7)', () => {
               pendingQuestions: [],
               actions: [],
             };
+      if (unresolved) {
+        runtime.unresolvedEffectEnvelopes = () =>
+          parked
+            ? [{ kind: 'boundary', boundaryId: committed.boundaries[0]!.boundaryId }]
+            : [];
+      }
       return runtime;
     };
     const capabilityBase = fakeHostCapabilities(
@@ -14254,21 +14293,39 @@ describe('host-published runtime actions (CAPTAIN-60, CAPTAIN-7)', () => {
     );
 
     const reply = context.replies.at(-1)!;
+    const heads = `HEAD moved from ${UNRESOLVED_EFFECT_BASELINE_HEAD} to the proven commit ${COMMITTED_BEFORE_FAILURE_OID}.`;
+    if (made === undefined) {
+      // The unresolved entry already names the commits, so the report does
+      // not state them again.
+      expect(reply).toContain('Failure: ');
+      expect(reply).toContain(
+        `the step made more than one commit; HEAD moved from ${UNRESOLVED_EFFECT_BASELINE_HEAD} to ${COMMITTED_BEFORE_FAILURE_OID}.`,
+      );
+      expect(reply).not.toContain('Repository changes made before the failure:');
+      expect(shell.exportSettlement()?.unresolvedEffects).toEqual([
+        {
+          classification: 'multiple-commits',
+          baselineHead: UNRESOLVED_EFFECT_BASELINE_HEAD,
+          afterHead: COMMITTED_BEFORE_FAILURE_OID,
+        },
+      ]);
+      await shell.dispose?.();
+      return;
+    }
     const report = [
       'Repository changes made before the failure:',
-      `- A step made one new commit; HEAD moved from ${UNRESOLVED_EFFECT_BASELINE_HEAD} to the proven commit ${COMMITTED_BEFORE_FAILURE_OID}.`,
+      `- A step ${made}; ${heads}`,
       'The failure does not undo these commits.',
     ].join('\n');
     expect(reply).toContain(report);
     expect(reply.split(report)).toHaveLength(2);
     expect(reply.indexOf(report)).toBeLessThan(reply.indexOf('Failure: '));
-    // The closing-reply prompt reads the commit as a settlement fact.
-    const fact =
-      `Before the failure, a step made one new commit; HEAD moved from ${UNRESOLVED_EFFECT_BASELINE_HEAD} to the proven commit ${COMMITTED_BEFORE_FAILURE_OID}.`;
+    // The closing-reply prompt reads the commits as a settlement fact.
+    const fact = `Before the failure, a step ${made}; ${heads}`;
     expect(
       context.captainCalls.some(({ prompt }) => prompt.includes(fact)),
     ).toBe(true);
-    // The commit is reported beside the failure, never as an unresolved effect.
+    // The commits are reported beside the failure, never as an unresolved effect.
     expect(shell.exportSettlement()?.unresolvedEffects).toEqual([]);
     await shell.dispose?.();
   });

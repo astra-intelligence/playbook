@@ -1497,6 +1497,8 @@ function carriedPreExistingFacts(
 interface CommitBeforeFailure {
   readonly baselineHead: string;
   readonly commitOid: string;
+  /** Every new commit, oldest first, where the step made more than one (DR-088). */
+  readonly commits?: readonly string[];
 }
 
 function commitsBeforeFailure(
@@ -1504,9 +1506,16 @@ function commitsBeforeFailure(
   boundaryPrefixCount: number,
   unresolvedEffects: readonly PlaybookCaptainUnresolvedEffect[],
 ): readonly CommitBeforeFailure[] {
+  // An entry names a commit by its proven OID, or — for a receipt listing
+  // several commits, which projects as `multiple-commits` (DR-088 §3) — by
+  // its after HEAD, the last of them.
   const named = new Set(
-    unresolvedEffects.flatMap(({ commitOid }) =>
-      commitOid === undefined ? [] : [commitOid],
+    unresolvedEffects.flatMap(({ classification, afterHead, commitOid }) =>
+      commitOid !== undefined
+        ? [commitOid]
+        : classification === 'multiple-commits' && afterHead !== undefined
+          ? [afterHead]
+          : [],
     ),
   );
   const commits: CommitBeforeFailure[] = [];
@@ -1524,13 +1533,27 @@ function commitsBeforeFailure(
     commits.push({
       baselineHead: receipt.baseline.head,
       commitOid: receipt.commitOid,
+      ...(receipt.commits === undefined ? {} : { commits: receipt.commits }),
     });
   }
   return commits;
 }
 
+/** What one step committed, with every commit where it made several (DR-088). */
+function commitBeforeFailureClause({
+  baselineHead,
+  commitOid,
+  commits,
+}: CommitBeforeFailure): string {
+  const made =
+    commits === undefined
+      ? 'made one new commit'
+      : `made ${commits.length} new commits, oldest first: ${boundedPathList(commits)}`;
+  return `${made}; HEAD moved from ${baselineHead} to the proven commit ${commitOid}.`;
+}
+
 function commitBeforeFailureFact(commit: CommitBeforeFailure): string {
-  return `Before the failure, a step made one new commit; HEAD moved from ${commit.baselineHead} to the proven commit ${commit.commitOid}.`;
+  return `Before the failure, a step ${commitBeforeFailureClause(commit)}`;
 }
 
 function commitsBeforeFailureReport(
@@ -1540,8 +1563,7 @@ function commitsBeforeFailureReport(
   return [
     'Repository changes made before the failure:',
     ...commits.map(
-      ({ baselineHead, commitOid }) =>
-        `- A step made one new commit; HEAD moved from ${baselineHead} to the proven commit ${commitOid}.`,
+      (commit) => `- A step ${commitBeforeFailureClause(commit)}`,
     ),
     'The failure does not undo these commits.',
   ].join('\n');
