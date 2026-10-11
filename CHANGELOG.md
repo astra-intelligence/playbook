@@ -41,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   naming its error, and a second one parks the step in its failure state
   with a `judge-failed` cause and its ordinary controls
   ([[playbook-runtime-49](specs/packages/playbook-runtime.md#playbook-runtime-49)]).
+- **A failed turn's reply states the commits it made.** When a turn settles
+  with its leaf parked in failure, the Playbook Captain shell reports every
+  commit the turn's receipts proved beside the failure report and gives the
+  closing-reply prompt the same facts, so the reply cannot say nothing was
+  written ([[playbook-captain-85](specs/packages/playbook-captain.md#playbook-captain-85)]).
 
 ## [17.7.0] - 2026-10-11
 

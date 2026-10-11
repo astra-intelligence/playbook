@@ -783,6 +783,61 @@ function carriedPreExistingTestLedger(
   });
 }
 
+const COMMITTED_BEFORE_FAILURE_OID = 'e'.repeat(40);
+
+// DR-089: one completed boundary whose receipt proves one new commit that the
+// turn's later failure leaves standing, outside any unresolved envelope.
+function committedBeforeFailureTestLedger(
+  playbookId: string,
+  runtimeSessionId: string,
+) {
+  const baseline = {
+    worktree: '/current/worktree',
+    gitDir: '/current/worktree/.git',
+    head: UNRESOLVED_EFFECT_BASELINE_HEAD,
+    projection: {},
+    projectionDigest:
+      'sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a',
+  };
+  const after = { ...baseline, head: COMMITTED_BEFORE_FAILURE_OID };
+  return assertPlaybookEffectLedger({
+    schemaVersion: 1,
+    revision: 1,
+    boundaries: [
+      {
+        sequence: 1,
+        boundaryId: 'c3000000-0000-4000-8000-000000000003',
+        attemptId: 'c4000000-0000-4000-8000-000000000004',
+        attemptNumber: 1,
+        playbookId,
+        runtimeSessionId,
+        turnId: 1,
+        callId: `${playbookId}:analyst:committed`,
+        roleId: 'coder',
+        sourceStateId: 'working',
+        sourceOutcomeSchema: { committed: {} },
+        dispositions: ['one-descendant-commit'],
+        canonicalWorktree: {
+          worktree: baseline.worktree,
+          gitDir: baseline.gitDir,
+        },
+        baseline,
+        after,
+        physicalReceipt: {
+          classification: 'one-descendant-commit',
+          baseline,
+          after,
+          commitOid: after.head,
+        },
+        finalText: 'Committed the four intent records.',
+        semanticCandidate: { guard: 'committed' },
+        correctionBudget: { limit: 1, spent: false },
+      },
+    ],
+    logicalOperations: [],
+  });
+}
+
 /**
  * One standalone boundary per unresolved-effect classification, each with
  * the HEAD evidence its report form needs: a proven commit, a move, a stay,
@@ -13884,6 +13939,90 @@ describe('host-published runtime actions (CAPTAIN-60, CAPTAIN-7)', () => {
       '- retry:step: Retry: run the failing step again',
     );
     expect(digest).not.toContain('no-op');
+    await shell.dispose?.();
+  });
+
+  it('states as fact the commit a turn proved before its leaf parked (DR-089)', async () => {
+    // W-23: the step committed, the run then failed, and the closing reply
+    // told the Boss nothing was written. The receipt's commit now joins the
+    // settlement facts and the Boss-visible report beside the failure.
+    const rootSessionId = '21000000-0000-4000-8000-0000000000a8';
+    const committed = committedBeforeFailureTestLedger('code', rootSessionId);
+    let current = emptyPlaybookEffectLedger();
+    let parked = false;
+    const malformed = {
+      name: 'MalformedActorOutput',
+      message: 'The acting player returned an unrecognized or incomplete result.',
+    };
+    const code = fakeCodeEntry(async (runtime) => {
+      current = committed;
+      parked = true;
+      runtime.snapshot = runtimeSnapshot('code', playbookState('failed'), {
+        turn: 1,
+        effectLedger: committed,
+      });
+      return { outcome: 'failed', state: playbookState('failed'), error: malformed };
+    });
+    delete code.entry.summaryPolicy;
+    const createRuntime = code.entry.createRuntime;
+    code.entry.createRuntime = (options, hostCapabilities) => {
+      const runtime = createRuntime(options, hostCapabilities) as FakeRuntime;
+      runtime.describe = () =>
+        parked
+          ? {
+              state: playbookState('failed'),
+              stateDescription: 'The step failed and is waiting for Boss.',
+              pendingQuestions: [],
+              actions: [RETRY],
+              lastError: malformed,
+            }
+          : {
+              state: playbookState('ready'),
+              stateDescription: 'The step is waiting for Boss.',
+              pendingQuestions: [],
+              actions: [],
+            };
+      return runtime;
+    };
+    const capabilityBase = fakeHostCapabilities(
+      code.entry,
+      'committed-before-failure-lease',
+    );
+    const capabilities: PlaybookHostConstructionCapabilities = {
+      ...capabilityBase,
+      effectLedger: {
+        snapshot: vi.fn(() => current),
+        writeAhead: vi.fn(async () => current),
+      },
+    };
+    const shell = makeShell(code, {
+      sessionIds: [rootSessionId],
+      hostCapabilities: { code: capabilities },
+    });
+    await shell.init!(stubSession().session);
+    const context = stubContext();
+    await shell.handleBossTurn(
+      turn('/code commit the intent records'),
+      context.context,
+    );
+
+    const reply = context.replies.at(-1)!;
+    const report = [
+      'Repository changes made before the failure:',
+      `- A step made one new commit; HEAD moved from ${UNRESOLVED_EFFECT_BASELINE_HEAD} to the proven commit ${COMMITTED_BEFORE_FAILURE_OID}.`,
+      'The failure does not undo these commits.',
+    ].join('\n');
+    expect(reply).toContain(report);
+    expect(reply.split(report)).toHaveLength(2);
+    expect(reply.indexOf(report)).toBeLessThan(reply.indexOf('Failure: '));
+    // The closing-reply prompt reads the commit as a settlement fact.
+    const fact =
+      `Before the failure, a step made one new commit; HEAD moved from ${UNRESOLVED_EFFECT_BASELINE_HEAD} to the proven commit ${COMMITTED_BEFORE_FAILURE_OID}.`;
+    expect(
+      context.captainCalls.some(({ prompt }) => prompt.includes(fact)),
+    ).toBe(true);
+    // The commit is reported beside the failure, never as an unresolved effect.
+    expect(shell.exportSettlement()?.unresolvedEffects).toEqual([]);
     await shell.dispose?.();
   });
 
