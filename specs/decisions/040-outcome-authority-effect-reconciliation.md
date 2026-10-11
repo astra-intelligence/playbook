@@ -22,6 +22,8 @@ Amended by [DR-063](063-failures-explain-themselves.md): a parked failure carrie
 
 Amended by [DR-071](071-interrupted-continuation-settlement.md); its lost-progress runtime marker is replaced by [DR-072](072-host-owned-interrupted-work-settlement.md).
 
+Amended by [DR-088](088-a-commit-outcome-takes-every-new-commit.md): §2's `one-descendant-commit` proof covers one or more new commits, listed on the receipt, and under §1 and §5 a commit outcome over an `unchanged` receipt takes the commit already at HEAD that its final text names, where the call declares no `unchanged` outcome.
+
 ## Context
 
 - A player reply currently serves simultaneously as human presentation, semantic evidence for a hidden adjudicator, and proof of repository effects.
