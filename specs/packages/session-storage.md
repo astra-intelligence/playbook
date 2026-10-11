@@ -184,7 +184,12 @@ The published session API shall offer applications the same create, open, begin-
 - read-only owner checks may overlap each other and record writes, so concurrent players can check the same lease; release rejects new checks and drains admitted checks before retiring ownership;
 - existing summary and replay reads remain available and never expose provider hints;
 - read-only lease inspection reports `active` for a live owner on this machine, `idle` for no lease or a proven-dead owner on this machine, and `unknown` otherwise, reading the owner's machine as the lease does [[playbook-cli-23](playbook-cli.md#playbook-cli-23)]; this observation never grants mutation authority;
-- the lifecycle also exposes the shared read-only validator and explicit migration/deletion operations, so management does not require executable playbook modules.
+- the lifecycle also exposes the shared read-only validator and explicit migration/deletion operations, so management does not require executable playbook modules;
+- the store factory's optional boolean `createSessionsDir` defaults to `true`, creating a missing sessions directory and its missing ancestors as private directories; `false` lets a host that prepared the directory forbid that:
+  - no preparation of a session payload, lease, asset or migration directory by that store, or by a migration source store it opens, creates its sessions directory or any ancestor of it; runtime and management acquisition, deletion, migration, and record and asset writes refuse while it is missing, including when it moves or disappears mid-operation, leaving the former path absent and reporting the refusal even if releasing an earlier lease then fails;
+  - lease staging and asset directories are still created singly inside the existing directory, under the unchanged privacy checks and lease rules [[playbook-cli-23](playbook-cli.md#playbook-cli-23)];
+  - the machine identity keeps its own directory provisioning [[playbook-cli-97](playbook-cli.md#playbook-cli-97)], unaffected by this option even where that directory shares an ancestor with the sessions directory, so a process's first identity resolution may create that shared ancestor;
+  - a refusal is not kept: the same store acquires normally once the directory exists again.
 
 ### session-storage-12
 
@@ -247,6 +252,7 @@ When the integration suite creates, continues and deletes sessions through inter
 - exact manifest fields for each state [[session-storage-2](#session-storage-2)];
 - shared lifecycle, leases and read-only active/idle/unknown observations without file changes [[session-storage-11](#session-storage-11)];
 - concurrent owner checks and release's admission barrier over the real store [[session-storage-11](#session-storage-11)];
+- a missing sessions directory and parent created by default yet refused with `createSessionsDir: false` by runtime and management acquisition, deletion, migration and a held lease's record and asset writes, a directory removed or moved during a held acquisition, deletion or migration left absent at its former path with the refusal reported past a failed lease release, and the same store acquiring once it is restored [[session-storage-11](#session-storage-11)];
 - interrupted deletion, safe retries and retained lease directories [[session-storage-12](#session-storage-12)];
 - one codec across hosts [[session-storage-13](#session-storage-13)].
 

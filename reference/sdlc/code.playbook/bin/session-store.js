@@ -28,7 +28,7 @@ import {
   unlink,
 } from 'node:fs/promises';
 import { homedir, hostname as systemHostname } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { assertSupportedEffort } from '@sublang/cligent';
@@ -660,18 +660,28 @@ export function createCaptainSessionStore(options = {}) {
   const probeProcess =
     options.probeProcess ?? ((pid) => process.kill(pid, 0));
   const fs = { ...DEFAULT_FS_OPERATIONS, ...(options.fsOps ?? {}) };
+  // session-storage-11: a host that prepared the directory may forbid
+  // creating it or an ancestor, so a directory that moves or vanishes
+  // mid-operation is refused rather than recreated at its former path.
+  const createSessionsDir =
+    options.createSessionsDir === undefined ? true : options.createSessionsDir;
+  const mayCreateDirectory = (directory) =>
+    createSessionsDir || !isPathOrAncestor(directory, sessionsDir);
   const replayReadCursors = new Map();
   const replayReadQueues = new Map();
   const portableWriters = new Map();
   const assetStores = new Map();
   const assetStoreFor = (sessionId) => {
     assertSessionId(sessionId);
-    if (!assetStores.has(sessionId)) assetStores.set(sessionId, createAssetStore({ directory: join(sessionsDir, `${sessionId}.assets`), ...(options.maxAssetBytes === undefined ? {} : { maxAssetBytes: options.maxAssetBytes }) }));
+    if (!assetStores.has(sessionId)) assetStores.set(sessionId, createAssetStore({ directory: join(sessionsDir, `${sessionId}.assets`), createAncestors: createSessionsDir, ...(options.maxAssetBytes === undefined ? {} : { maxAssetBytes: options.maxAssetBytes }) }));
     return assetStores.get(sessionId);
   };
 
   if (!isAbsolute(sessionsDir)) {
     throw new Error('Captain session store path must be absolute');
+  }
+  if (typeof createSessionsDir !== 'boolean') {
+    throw new TypeError('Captain session store createSessionsDir must be a boolean');
   }
   if (
     explicitHostname !== undefined &&
@@ -1101,7 +1111,7 @@ export function createCaptainSessionStore(options = {}) {
       : await portableWriters.get(recordValue.sessionId)?.checkpoint(recordValue);
     if (record === undefined) throw new Error('session persistence requires its owning lifecycle');
     const destination = recordPathFor(record.sessionId);
-    await ensurePrivateDirectory(sessionsDir, fs);
+    await ensurePrivateDirectory(sessionsDir, fs, mayCreateDirectory);
 
     if (noReplace) {
       await assertPathMissing(
@@ -1358,7 +1368,7 @@ export function createCaptainSessionStore(options = {}) {
   };
 
   const makeLeaseStage = async (sessionId) => {
-    await ensurePrivateDirectory(sessionsDir, fs);
+    await ensurePrivateDirectory(sessionsDir, fs, mayCreateDirectory);
     const ownerToken = createLeaseToken();
     assertUuid(ownerToken, 'Captain session lease owner token');
     const retiredPath = retiredPathFor(sessionId, ownerToken);
@@ -1625,10 +1635,10 @@ export function createCaptainSessionStore(options = {}) {
     // the lease below; a preflight read never authorizes migration writes.
     try { decodeSource(await readPrivateRegularFile(sourcePath, 0o600, fs, 'migration source')); }
     catch (cause) { if (cause?.code !== 'ENOENT' || !sidecar && !external) throw cause; }
-    let sourceLease, lease;
+    let sourceLease, lease, failure;
     try {
       if (external) {
-        const sourceStore = createCaptainSessionStore({ sessionsDir: sourceDir, env, homeDir: home, fsOps: fs, resolveHostname: localIdentity, legacyHostname, pid: localPid, probeProcess });
+        const sourceStore = createCaptainSessionStore({ sessionsDir: sourceDir, createSessionsDir, env, homeDir: home, fsOps: fs, resolveHostname: localIdentity, legacyHostname, pid: localPid, probeProcess });
         sourceLease = await sourceStore.acquireManagement(sessionId);
       }
       lease = await acquire(sessionId, true);
@@ -1719,7 +1729,7 @@ export function createCaptainSessionStore(options = {}) {
           if (existing !== `${JSON.stringify(manifest)}\n`) throw new Error('migration destination manifest diverged');
         } catch (cause) { if (cause?.code !== 'ENOENT') throw cause; }
       }
-      await ensurePrivateDirectory(inputsDir, fs);
+      await ensurePrivateDirectory(inputsDir, fs, mayCreateDirectory);
       const inputs = [{ path: sourcePath, bytes: Buffer.from(sourceBytes, 'utf8') }, ...(originalReplay === undefined ? [] : [{ path: sourceReplayPath, bytes: originalReplay }])];
       for (const [index, input] of inputs.entries()) {
         const path = join(inputsDir, String(index));
@@ -1743,8 +1753,11 @@ export function createCaptainSessionStore(options = {}) {
       if (sidecar || external) { await fs.unlink(sourcePath); await syncDirectory(sourceDir, fs); }
       await writePrivateJson(receiptPath, { ...receipt, complete: true }, fs);
       return { manifest, migrated: true, reasons: [] };
+    } catch (cause) {
+      failure = { cause };
+      throw cause;
     } finally {
-      try { await lease?.release(); } finally { await sourceLease?.release(); }
+      await releaseInOrder([lease, sourceLease], failure, `cannot migrate Captain session ${JSON.stringify(sessionId)} without leaving ownership uncertain`);
     }
   };
 
@@ -1754,7 +1767,7 @@ export function createCaptainSessionStore(options = {}) {
     const sourceDir = join(sourceEnv.XDG_STATE_HOME || join(sourceHome, '.local', 'state'), 'playbook', 'sessions');
     const result = { sourceDir, migrated: [], skipped: [] };
     if (sourceDir === sessionsDir) return result;
-    const sourceStore = createCaptainSessionStore({ sessionsDir: sourceDir, env: sourceEnv, homeDir: sourceHome, fsOps: fs, resolveHostname: localIdentity, legacyHostname, pid: localPid, probeProcess });
+    const sourceStore = createCaptainSessionStore({ sessionsDir: sourceDir, createSessionsDir, env: sourceEnv, homeDir: sourceHome, fsOps: fs, resolveHostname: localIdentity, legacyHostname, pid: localPid, probeProcess });
     await sourceStore.prepare();
     try { await assertPrivateDirectory(sourceDir, fs); }
     catch (cause) { if (cause?.code === 'ENOENT') return result; throw cause; }
@@ -1778,8 +1791,10 @@ export function createCaptainSessionStore(options = {}) {
 
   const remove = async (sessionId) => {
     const lease = await acquire(sessionId, true);
+    let failure;
     try { await lease.assertOwner(); await deleteRecord(sessionId); }
-    finally { await lease.release(); }
+    catch (cause) { failure = { cause }; throw cause; }
+    finally { await releaseInOrder([lease], failure, `cannot delete Captain session ${JSON.stringify(sessionId)} without leaving ownership uncertain`); }
   };
 
   const exportBundle = async (sessionId) => {
@@ -6706,7 +6721,7 @@ async function assertPathMissing(path, fs, message) {
 }
 
 
-async function ensurePrivateDirectory(path, fs) {
+async function ensurePrivateDirectory(path, fs, mayCreate = () => true) {
   try {
     await assertPrivateDirectory(path, fs);
     return;
@@ -6728,6 +6743,15 @@ async function ensurePrivateDirectory(path, fs) {
       cursor = parent;
     }
   }
+  // Refuse before creating anything, so a forbidden ancestor is never
+  // recreated beneath a permitted descendant (session-storage-11).
+  const forbidden = missing.find((directory) => !mayCreate(directory));
+  if (forbidden !== undefined) {
+    throw Object.assign(
+      new Error(`Captain session store directory ${JSON.stringify(forbidden)} is missing and this store may not create it`),
+      { code: 'ENOENT' },
+    );
+  }
   for (const directory of missing.reverse()) {
     let created = false;
     try {
@@ -6748,6 +6772,32 @@ async function ensurePrivateDirectory(path, fs) {
     }
   }
   await assertPrivateDirectory(path, fs);
+}
+
+// Releases every acquired lease in order. Without an earlier failure the
+// last release error propagates, as nested try/finally releases would; a
+// release error never hides the failure that preceded it.
+async function releaseInOrder(leases, failure, message) {
+  const errors = [];
+  for (const lease of leases) {
+    try {
+      await lease?.release();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length === 0) return;
+  if (failure === undefined) throw errors.at(-1);
+  throw new AggregateError([failure.cause, ...errors], message);
+}
+
+function isPathOrAncestor(directory, path) {
+  const fromDirectory = relative(directory, path);
+  return fromDirectory === '' || (
+    fromDirectory !== '..' &&
+    !fromDirectory.startsWith(`..${sep}`) &&
+    !isAbsolute(fromDirectory)
+  );
 }
 
 async function assertPrivateDirectory(path, fs) {

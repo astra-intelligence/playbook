@@ -10,8 +10,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [17.7.0] - 2026-10-11
+
+### Added
+
+- `createSessionStore` from `@sublang/playbook/session-store` accepts an
+  optional boolean `createSessionsDir`. The default `true` keeps creating a
+  missing sessions directory and its parents. A host that prepared the
+  directory passes `false`: acquisition, management, deletion, migration
+  (including its source store), record writes and asset imports then refuse
+  a missing directory, even when it moves or disappears mid-operation,
+  without preparing missing session directories or their parents;
+  machine-identity provisioning keeps its existing rule. Lock-staging and
+  asset directories are still created singly inside the existing directory,
+  and the same store works again once the directory is restored
+  ([[session-storage-11](specs/packages/session-storage.md#session-storage-11)],
+  [[playbook-cli-97](specs/packages/playbook-cli.md#playbook-cli-97)]).
+
 ### Fixed
 
+- Report the original failure of a session deletion or migration when
+  releasing its lease then also fails, as an `AggregateError` listing that
+  failure first, instead of replacing it with the release error
+  ([[session-storage-11](specs/packages/session-storage.md#session-storage-11)]).
 - Read the machine identity file again at the next lease or claim after a
   refusal, so a session store or repository coordinator recovers once an
   unreadable or malformed file is repaired instead of repeating the first
@@ -885,7 +906,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Conformance test suite (386 tests across six files) pinning the gears ↔ FSM 1:1 mapping (PLAYBOOK-1..6), runtime contract (PBRT-5..16), prompt composition, introspect helpers, and onDone arm coverage.
 - Package exports `./code/playbook` (the host-agnostic `createPlaybookRuntime` factory) and `./code/tmux-play` (the cligent-bound Captain factory).
 
-[Unreleased]: https://github.com/sublang-ai/playbook/compare/v17.6.0...HEAD
+[Unreleased]: https://github.com/sublang-ai/playbook/compare/v17.7.0...HEAD
+[17.7.0]: https://github.com/sublang-ai/playbook/compare/v17.6.0...v17.7.0
 [17.6.0]: https://github.com/sublang-ai/playbook/compare/v17.5.0...v17.6.0
 [17.5.0]: https://github.com/sublang-ai/playbook/compare/v17.4.1...v17.5.0
 [17.4.1]: https://github.com/sublang-ai/playbook/compare/v17.4.0...v17.4.1

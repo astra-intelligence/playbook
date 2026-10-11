@@ -87,9 +87,15 @@ export function createAssetStore(options) {
   const directory = resolve(options.directory);
   const maxAssetBytes = options.maxAssetBytes ?? DEFAULT_MAX_ASSET_BYTES;
   if (!Number.isSafeInteger(maxAssetBytes) || maxAssetBytes <= 0) throw new TypeError('maximum asset bytes must be a positive safe integer');
+  // A session store forbidding creation of its sessions directory creates
+  // only this leaf inside it (session-storage-11).
+  const createAncestors = options.createAncestors ?? true;
   let importTail = Promise.resolve();
   const ensureDirectory = async (create) => {
-    if (create) await mkdir(directory, { recursive: true, mode: 0o700 });
+    if (create) {
+      try { await mkdir(directory, { recursive: createAncestors, mode: 0o700 }); }
+      catch (error) { if (createAncestors || error.code !== 'EEXIST') throw error; }
+    }
     assertDirectory(await lstat(directory));
   };
   const prepare = async () => {
