@@ -332,11 +332,8 @@ describe('exclusive governed calls (playbook-cli-88)', () => {
         repo.git('add', '-A');
         repo.git('commit', '-qm', 'two');
       },
-      'multiple-commits',
-      {
-        commitOid: false,
-        reconcile: ['one-descendant-commit', 'unresolved'],
-      },
+      'one-descendant-commit',
+      { commitOid: true, reconcile: ['one-descendant-commit', 'resolved'] },
     ],
     [
       'an amended HEAD',
@@ -433,6 +430,144 @@ describe('exclusive governed calls (playbook-cli-88)', () => {
       expect(claimIsActive(repo.dir)).toBe(false);
     },
   );
+
+  // DR-088: a commit-required step whose outcomes all commit or ask, as a
+  // drafted design's "write and commit" step declares them, reconciled by
+  // the engine's own reconciler inside the real completion transaction.
+  describe('commit outcomes over every new commit or the commit already at HEAD (DR-088)', () => {
+    const outcomes = {
+      done: {
+        fields: { report: 'presentation', latestCommit: 'effect' },
+        repositoryDisposition: 'one-descendant-commit',
+      },
+      needsBossReply: {
+        fields: { question: 'presentation' },
+        repositoryDisposition: 'deferred',
+      },
+    } as const;
+
+    async function commitStep(
+      repo: Repo,
+      mutate: () => Promise<void> | void,
+      finalText: (head: string) => string,
+    ) {
+      const capabilities = await capabilitiesFor(repo.dir);
+      let reconciliation:
+        | ReturnType<typeof reconcilePlaybookSemanticEvidence>
+        | undefined;
+      const result = await capabilities.repository.runExclusive({
+        effectBoundary: seed(['one-descendant-commit', 'deferred']),
+        operation: async () => {
+          await mutate();
+          return { status: 'ok' };
+        },
+        completeEffectBoundary: ({ receipt }) => {
+          const text = finalText(repo.head());
+          reconciliation = reconcilePlaybookSemanticEvidence({
+            outcomes,
+            semanticCandidate: { guard: 'done' },
+            finalText: text,
+            receipt,
+          });
+          return {
+            finalText: text,
+            semanticCandidate: { guard: 'done' },
+            ...(reconciliation.status === 'unresolved'
+              ? { unresolved: true as const }
+              : {}),
+          };
+        },
+      });
+      expect(() => assertPlaybookEffectLedger(result.effectLedger)).not.toThrow();
+      expect(result.effectLedger.boundaries[0]?.physicalReceipt).toEqual(
+        result.receipt,
+      );
+      expect(claimIsActive(repo.dir)).toBe(false);
+      return { receipt: result.receipt, reconciliation: reconciliation! };
+    }
+
+    it('takes two commits in one step as its commit outcome with both listed', async () => {
+      const repo = await makeRepo('two-commits');
+      const base = repo.head();
+      const { receipt, reconciliation } = await commitStep(
+        repo,
+        async () => {
+          await writeFile(join(repo.dir, 'tests.txt'), 'tests\n');
+          repo.git('add', '-A');
+          repo.git('commit', '-qm', 'tests and matrix');
+          await writeFile(join(repo.dir, 'tests.txt'), 'tests, audited\n');
+          repo.git('commit', '-qam', 'audit fixes');
+        },
+        () => 'Committed the tests, then the audit fixes.',
+      );
+      const listed = repo.git('rev-list', '--reverse', `${base}..HEAD`).trim().split('\n');
+      expect(listed).toHaveLength(2);
+      expect(receipt).toMatchObject({
+        classification: 'one-descendant-commit',
+        commitOid: repo.head(),
+        commits: listed,
+      });
+      expect(reconciliation).toMatchObject({
+        status: 'resolved',
+        output: { guard: 'done', latestCommit: repo.head() },
+      });
+    });
+
+    it('takes the commit already at HEAD when the player names it and nothing changed', async () => {
+      const repo = await makeRepo('already-at');
+      await writeFile(join(repo.dir, 'design.md'), 'approved design\n');
+      repo.git('add', '-A');
+      repo.git('commit', '-qm', 'design: approved');
+      const head = repo.head();
+      const { receipt, reconciliation } = await commitStep(
+        repo,
+        () => undefined,
+        (current) =>
+          `The approved design was already committed as ${current.slice(0, 7)}; kept it.`,
+      );
+      expect(receipt).toMatchObject({ classification: 'unchanged' });
+      expect(receipt.after?.head).toBe(head);
+      expect(receipt).not.toHaveProperty('commitOid');
+      expect(reconciliation).toMatchObject({
+        status: 'resolved',
+        output: { guard: 'done', latestCommit: head },
+      });
+    });
+
+    it('keeps the committed-nothing failure when no commit is named', async () => {
+      const repo = await makeRepo('nothing-named');
+      const { receipt, reconciliation } = await commitStep(
+        repo,
+        () => undefined,
+        () => 'Kept the earlier commit as it is.',
+      );
+      expect(receipt.classification).toBe('unchanged');
+      expect(reconciliation).toMatchObject({
+        status: 'unresolved',
+        reason: 'repository-disposition-mismatch',
+        cause: { code: 'commit-missing' },
+      });
+    });
+
+    it('keeps a rewritten history a failure even when the player names its HEAD', async () => {
+      const repo = await makeRepo('rewritten');
+      const { receipt, reconciliation } = await commitStep(
+        repo,
+        async () => {
+          await writeFile(join(repo.dir, 'base.txt'), 'amended\n');
+          repo.git('commit', '-q', '--amend', '-am', 'base amended');
+        },
+        (current) => `Amended the base commit; it is now ${current}.`,
+      );
+      expect(receipt.classification).toBe('rewritten-or-non-descendant');
+      expect(receipt).not.toHaveProperty('commits');
+      expect(reconciliation).toMatchObject({
+        status: 'unresolved',
+        reason: 'repository-disposition-mismatch',
+        cause: { code: 'history-rewritten' },
+      });
+    });
+  });
 
   it('sees a re-modified already-dirty file and a reverted baseline-dirty entry', async () => {
     const redirtied = await makeRepo('redirtied');
@@ -901,7 +1036,8 @@ describe('a working directory that is not a repository yet (playbook-cli-88)', (
     expect(initialized.receipt.classification).toBe('unchanged');
     expect(Object.keys(initialized.receipt.after?.projection ?? {})).toEqual(['draft.txt']);
 
-    // Two root-descended commits are not one descendant of the null HEAD.
+    // Two root-descended commits are both new to the null HEAD: the receipt
+    // proves the commit outcome and lists them, oldest first (DR-088 §1).
     const twice = await runBoundary(capabilities, ['one-descendant-commit'], async () => {
       git('add', '-A');
       git('commit', '-qm', 'one');
@@ -909,7 +1045,17 @@ describe('a working directory that is not a repository yet (playbook-cli-88)', (
       git('add', '-A');
       git('commit', '-qm', 'two');
     });
-    expect(twice.receipt.classification).toBe('multiple-commits');
+    expect(twice.receipt.classification).toBe('one-descendant-commit');
+    expect(twice.receipt.commits).toEqual(
+      git('rev-list', '--reverse', 'HEAD').trim().split('\n'),
+    );
+    expect(twice.receipt.commits).toHaveLength(2);
+    expect(twice.receipt.commitOid).toBe(git('rev-parse', 'HEAD').trim());
+    expect(twice.receipt.preExisting).toEqual({
+      absorbed: ['draft.txt'],
+      altered: [],
+      lost: [],
+    });
     expect(() => assertPlaybookEffectLedger(twice.effectLedger)).not.toThrow();
     expect(twice.effectLedger.boundaries).toHaveLength(3);
 

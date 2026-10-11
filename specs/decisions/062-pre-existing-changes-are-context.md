@@ -11,6 +11,8 @@ The observation itself, the exclusive claim, the exclusively-`unchanged` and coh
 
 Amended by [DR-073](073-durable-step-progress.md): a carried-changes report not presented because the turn was cancelled or lost is presented with the next reply that is shown.
 
+Amended by [DR-088](088-a-commit-outcome-takes-every-new-commit.md): §2's accounting applies to an advance of one or more new commits rather than to exactly one.
+
 ## Context
 
 - A `/code` run in an embedding host started on a working tree holding four modified files and three untracked seeds that a scaffold update had left.

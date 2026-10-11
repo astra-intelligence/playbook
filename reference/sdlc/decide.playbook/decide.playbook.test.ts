@@ -3985,6 +3985,71 @@ describe('DECIDE pre-existing changes (DR-062 §4)', () => {
   });
 });
 
+// DR-088 §2: the merge declares no unchanged outcome, so a merge whose
+// synthesis already stands at HEAD takes that commit when the Coder names it.
+describe('DECIDE merge over the commit already at HEAD (DR-088)', () => {
+  it.each([
+    ['names', `The synthesis was already committed as ${'1'.repeat(7)}.`, true],
+    ['does not name', 'The synthesis was already committed.', false],
+  ] as const)(
+    'reconciles a merge that %s the commit already at HEAD',
+    async (_label, mergeText, accepted) => {
+      const statuses: string[] = [];
+      const requests: PlaybookCallRequest[] = [];
+      let coderCalls = 0;
+      const runtime = createLinkedPlaybookRuntime({
+        configuredOptions: {},
+        hostCapabilities: createTestEffectHost({
+          exclusiveClassifications: ['unchanged'],
+        }).hostCapabilities,
+      });
+      await runtime.init(
+        session(
+          completePorts({
+            callPlayer: async (roleId) => {
+              if (roleId === 'reviewer') {
+                return { status: 'ok', finalText: 'Reviewer proposal' };
+              }
+              coderCalls += 1;
+              return {
+                status: 'ok',
+                finalText: coderCalls === 1 ? 'Coder proposal' : mergeText,
+              };
+            },
+            callJudge: async (prompt) => judgeReply(prompt),
+            callPlaybook: async (request) => {
+              requests.push(request);
+              return { state: 'suspended', childSessionId: 'review-child' };
+            },
+            emitStatus: async (message) => {
+              statuses.push(message);
+            },
+          }),
+        ),
+      );
+      const result = await runtime.handleBossInput({
+        text: 'Choose the durable design.',
+        signal: signal(),
+      });
+      if (accepted) {
+        expect(result).toMatchObject({ outcome: 'suspended' });
+        expect(statuses).toContain('→ committed');
+        expect(requests).toHaveLength(1);
+        expect(requests[0]?.text).toContain('1'.repeat(40));
+      } else {
+        expect(result).toMatchObject({
+          outcome: 'failed',
+          state: { stateId: 'failed' },
+          error: { cause: { code: 'commit-missing' } },
+        });
+        expect(statuses).not.toContain('→ committed');
+        expect(requests).toEqual([]);
+      }
+      await runtime.dispose();
+    },
+  );
+});
+
 describe('DECIDE failure causes (DR-063)', () => {
   interface Cause {
     code: string;

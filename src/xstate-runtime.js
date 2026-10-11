@@ -796,7 +796,7 @@ function assertObservationIdentity(observation, identity, path) {
 function effectReceipt(value, path, expectedBaseline, expectedAfter, matchExpectedAfter = false, dispositions) {
     if (!isRecord(value))
         throw new TypeError(`${path} must be an object`);
-    rejectUnknownKeys(value, ['classification', 'baseline', 'after', 'commitOid', 'preExisting'], path);
+    rejectUnknownKeys(value, ['classification', 'baseline', 'after', 'commitOid', 'commits', 'preExisting'], path);
     if (typeof value.classification !== 'string' ||
         !EFFECT_RECEIPT_CLASSIFICATIONS.has(value.classification)) {
         throw new TypeError(`${path}.classification is not supported`);
@@ -836,6 +836,21 @@ function effectReceipt(value, path, expectedBaseline, expectedAfter, matchExpect
     }
     else if (commitOid !== undefined) {
         throw new TypeError(`${path}.commitOid is permitted only for one-descendant-commit`);
+    }
+    // DR-088 §1: a receipt of more than one new commit lists every one, oldest
+    // first and ending at its commit OID; one new commit keeps today's shape.
+    if (own(value, 'commits')) {
+        const commits = value.commits;
+        if (classification !== 'one-descendant-commit' ||
+            !Array.isArray(commits) ||
+            commits.length < 2 ||
+            commits.some((oid) => typeof oid !== 'string' ||
+                !EFFECT_OID_PATTERN.test(oid) ||
+                oid === baseline.head) ||
+            new Set(commits).size !== commits.length ||
+            commits.at(-1) !== commitOid) {
+            throw new TypeError(`${path}.commits must list two or more new commits ending at the commit OID of a one-descendant-commit receipt`);
+        }
     }
     if (classification === 'unchanged' &&
         after !== undefined &&
@@ -1046,7 +1061,9 @@ function divergentProjectionPaths(baseline, after) {
  * proved. The receipt states the failure; nothing here infers one.
  */
 function playbookRepositoryFailureCause(required, receipt) {
-    const observed = receipt.classification;
+    // DR-088 §3: a receipt listing more than one new commit reads as
+    // `multiple-commits`, so its statement names more than one commit.
+    const observed = receipt.commits === undefined ? receipt.classification : 'multiple-commits';
     const baselineHead = receipt.baseline.head;
     const after = receipt.after;
     const common = { required, observed, baselineHead };
@@ -1138,10 +1155,24 @@ function unresolvedSemanticEvidence(reason, evidence, cause = assertPlaybookFail
     return Object.freeze({ status: 'unresolved', reason, cause, evidence });
 }
 /**
+ * DR-088 §2: whether the player's final text names one commit as a word, by
+ * its full OID or by an abbreviation of at least seven leading hex digits.
+ * It designates which observed commit is the work and proves nothing itself.
+ */
+function finalTextNamesCommit(finalText, oid) {
+    for (const [word] of finalText.matchAll(/(?<![0-9A-Za-z_])[0-9A-Fa-f]{7,64}(?![0-9A-Za-z_])/g)) {
+        if (oid.startsWith(word.toLowerCase()))
+            return true;
+    }
+    return false;
+}
+/**
  * Reconcile one exact semantic candidate with host-owned effect evidence.
  * Presentation prose remains opaque: it is retained verbatim and only its
  * trimmed value is copied into linker-declared presentation fields. No
- * repository fact is inferred from that prose or from the semantic candidate.
+ * repository fact is inferred from that prose or from the semantic candidate;
+ * the prose may only name, as the work, the commit an `unchanged` receipt
+ * observed at HEAD (DR-088 §2).
  */
 export function reconcilePlaybookSemanticEvidence(input) {
     let report;
@@ -1176,9 +1207,18 @@ export function reconcilePlaybookSemanticEvidence(input) {
         return unresolvedSemanticEvidence('invalid-repository-receipt', evidence);
     }
     const disposition = outcome.repositoryDisposition;
+    // DR-088 §2: a commit outcome over an unchanged receipt takes the commit
+    // already at HEAD when the final text names it and the call declares no
+    // outcome of its own for leaving the repository unchanged.
+    const alreadyAtHead = disposition === 'one-descendant-commit' &&
+        receipt.classification === 'unchanged' &&
+        receipt.after !== undefined &&
+        !/^0+$/.test(receipt.after.head) &&
+        Object.values(input.outcomes).every(({ repositoryDisposition }) => repositoryDisposition !== 'unchanged') &&
+        finalTextNamesCommit(finalText, receipt.after.head);
     const dispositionMatches = (disposition === 'unchanged' && receipt.classification === 'unchanged') ||
         (disposition === 'one-descendant-commit' &&
-            receipt.classification === 'one-descendant-commit') ||
+            (receipt.classification === 'one-descendant-commit' || alreadyAtHead)) ||
         (disposition === 'deferred' &&
             candidate.guard === 'needsBossReply' &&
             Object.entries(input.outcomes).some(([guard, declared]) => guard !== candidate.guard &&
@@ -1223,13 +1263,16 @@ export function reconcilePlaybookSemanticEvidence(input) {
             // DR-045: effect injection selects by the accepted arm's declared
             // repository disposition, never by the field's name. A
             // one-descendant-commit arm's effect fields carry the qualifying
-            // receipt's exact new-descendant commit OID; an unchanged arm's effect
-            // fields carry the matching unchanged receipt's observed HEAD OID. A
-            // deferred arm declares no effect field, and any shape the validated
-            // receipt cannot prove fails closed as unresolved.
+            // receipt's exact new-descendant commit OID, or the HEAD OID its final
+            // text named over an unchanged receipt (DR-088 §2); an unchanged arm's
+            // effect fields carry the matching unchanged receipt's observed HEAD
+            // OID. A deferred arm declares no effect field, and any shape the
+            // validated receipt cannot prove fails closed as unresolved.
             value =
                 disposition === 'one-descendant-commit'
-                    ? receipt.commitOid
+                    ? alreadyAtHead
+                        ? receipt.after?.head
+                        : receipt.commitOid
                     : disposition === 'unchanged'
                         ? receipt.after?.head
                         : undefined;

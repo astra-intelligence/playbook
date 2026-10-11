@@ -42,6 +42,8 @@ export interface PlaybookRepositoryReceipt {
   readonly baseline: PlaybookRepositoryObservation;
   readonly after?: PlaybookRepositoryObservation;
   readonly commitOid?: string;
+  /** Every new commit, oldest first, where HEAD advanced by more than one (DR-088). */
+  readonly commits?: readonly string[];
   readonly preExisting?: PlaybookRepositoryPreExistingChanges;
 }
 export interface RepositoryReceiptOptions {

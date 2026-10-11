@@ -114,7 +114,9 @@ export declare class PlaybookSemanticCandidateStructureError extends TypeError {
  * Reconcile one exact semantic candidate with host-owned effect evidence.
  * Presentation prose remains opaque: it is retained verbatim and only its
  * trimmed value is copied into linker-declared presentation fields. No
- * repository fact is inferred from that prose or from the semantic candidate.
+ * repository fact is inferred from that prose or from the semantic candidate;
+ * the prose may only name, as the work, the commit an `unchanged` receipt
+ * observed at HEAD (DR-088 §2).
  */
 export declare function reconcilePlaybookSemanticEvidence(input: PlaybookSemanticEvidenceInput): PlaybookSemanticReconciliation;
 /** Return the canonical empty host-owned effect-ledger mirror. */

@@ -1497,6 +1497,8 @@ function carriedPreExistingFacts(
 interface CommitBeforeFailure {
   readonly baselineHead: string;
   readonly commitOid: string;
+  /** Every new commit, oldest first, where the step made more than one (DR-088). */
+  readonly commits?: readonly string[];
 }
 
 function commitsBeforeFailure(
@@ -1504,9 +1506,16 @@ function commitsBeforeFailure(
   boundaryPrefixCount: number,
   unresolvedEffects: readonly PlaybookCaptainUnresolvedEffect[],
 ): readonly CommitBeforeFailure[] {
+  // An entry names a commit by its proven OID, or — for a receipt listing
+  // several commits, which projects as `multiple-commits` (DR-088 §3) — by
+  // its after HEAD, the last of them.
   const named = new Set(
-    unresolvedEffects.flatMap(({ commitOid }) =>
-      commitOid === undefined ? [] : [commitOid],
+    unresolvedEffects.flatMap(({ classification, afterHead, commitOid }) =>
+      commitOid !== undefined
+        ? [commitOid]
+        : classification === 'multiple-commits' && afterHead !== undefined
+          ? [afterHead]
+          : [],
     ),
   );
   const commits: CommitBeforeFailure[] = [];
@@ -1524,13 +1533,27 @@ function commitsBeforeFailure(
     commits.push({
       baselineHead: receipt.baseline.head,
       commitOid: receipt.commitOid,
+      ...(receipt.commits === undefined ? {} : { commits: receipt.commits }),
     });
   }
   return commits;
 }
 
+/** What one step committed, with every commit where it made several (DR-088). */
+function commitBeforeFailureClause({
+  baselineHead,
+  commitOid,
+  commits,
+}: CommitBeforeFailure): string {
+  const made =
+    commits === undefined
+      ? 'made one new commit'
+      : `made ${commits.length} new commits, oldest first: ${boundedPathList(commits)}`;
+  return `${made}; HEAD moved from ${baselineHead} to the proven commit ${commitOid}.`;
+}
+
 function commitBeforeFailureFact(commit: CommitBeforeFailure): string {
-  return `Before the failure, a step made one new commit; HEAD moved from ${commit.baselineHead} to the proven commit ${commit.commitOid}.`;
+  return `Before the failure, a step ${commitBeforeFailureClause(commit)}`;
 }
 
 function commitsBeforeFailureReport(
@@ -1540,11 +1563,83 @@ function commitsBeforeFailureReport(
   return [
     'Repository changes made before the failure:',
     ...commits.map(
-      ({ baselineHead, commitOid }) =>
-        `- A step made one new commit; HEAD moved from ${baselineHead} to the proven commit ${commitOid}.`,
+      (commit) => `- A step ${commitBeforeFailureClause(commit)}`,
     ),
     'The failure does not undo these commits.',
   ].join('\n');
+}
+
+/**
+ * DR-088 §2: whether a final text names one commit as a word, by its full OID
+ * or by an abbreviation of at least seven leading hex digits — the
+ * reconciler's own designation rule, read here to say what it accepted.
+ */
+function finalTextNamesCommit(finalText: string, oid: string): boolean {
+  for (const [word] of finalText.matchAll(
+    /(?<![0-9A-Za-z_])[0-9A-Fa-f]{7,64}(?![0-9A-Za-z_])/g,
+  )) {
+    if (oid.startsWith(word.toLowerCase())) return true;
+  }
+  return false;
+}
+
+/**
+ * DR-088 §3: what the steps completed after `boundaryPrefixCount` committed,
+ * one statement each, in boundary sequence order: every new commit where a
+ * receipt proves more than one, and the commit already at HEAD where a step
+ * whose outcomes all commit or ask named it over an `unchanged` receipt. A
+ * step in a deferred chain reads the chain's cumulative receipt at its last
+ * boundary.
+ */
+function stepCommitStatements(
+  ledger: PlaybookEffectLedger,
+  boundaryPrefixCount: number,
+): readonly string[] {
+  const statements: string[] = [];
+  for (const boundary of ledger.boundaries) {
+    if (boundary.sequence <= boundaryPrefixCount) continue;
+    let receipt = boundary.physicalReceipt;
+    if (boundary.logicalOperationId !== undefined) {
+      const operation = ledger.logicalOperations.find(
+        ({ operationId }) => operationId === boundary.logicalOperationId,
+      );
+      if (operation?.boundaryIds.at(-1) !== boundary.boundaryId) continue;
+      receipt = operation.logicalReceipt;
+    }
+    if (receipt === undefined) continue;
+    if (
+      receipt.classification === 'one-descendant-commit' &&
+      receipt.commits !== undefined
+    ) {
+      statements.push(
+        `The step made ${receipt.commits.length} new commits, oldest first: ${boundedPathList(receipt.commits)}.`,
+      );
+      continue;
+    }
+    const candidate = boundary.semanticCandidate;
+    const guard =
+      candidate !== null &&
+      typeof candidate === 'object' &&
+      !Array.isArray(candidate)
+        ? (candidate as { readonly [key: string]: JsonValue }).guard
+        : undefined;
+    const head = receipt.after?.head;
+    if (
+      receipt.classification === 'unchanged' &&
+      head !== undefined &&
+      !/^0+$/.test(head) &&
+      boundary.dispositions.includes('one-descendant-commit') &&
+      !boundary.dispositions.includes('unchanged') &&
+      typeof guard === 'string' &&
+      guard !== BOSS_QUESTION_OUTCOME &&
+      finalTextNamesCommit(boundary.finalText?.trim() ?? '', head)
+    ) {
+      statements.push(
+        `The step made no new commit; it named ${head}, already at HEAD, as its work.`,
+      );
+    }
+  }
+  return statements;
 }
 
 // DR-063 §4: the Boss-visible failure report. Every host sees the same
@@ -4307,6 +4402,15 @@ const unresolvedEffectFromReceipt = (
   baselineHead = receipt.baseline.head,
 ): PlaybookCaptainUnresolvedEffect | undefined => {
   if (receipt.classification === 'unchanged') return undefined;
+  // DR-088 §3: a receipt listing more than one new commit reads as
+  // `multiple-commits`, whose entry names more than one commit and no OID.
+  if (receipt.commits !== undefined) {
+    return {
+      classification: 'multiple-commits',
+      baselineHead,
+      ...(receipt.after === undefined ? {} : { afterHead: receipt.after.head }),
+    };
+  }
   return {
     classification: receipt.classification,
     baselineHead,
@@ -4409,12 +4513,18 @@ const cumulativeOpenLogicalEffect = (
     receipt.classification === 'one-descendant-commit' &&
     (sameProjection || receiptAccountsFromOriginal)
   ) {
-    return {
-      classification: 'one-descendant-commit',
-      baselineHead: original.head,
-      afterHead: after.head,
-      commitOid: after.head,
-    };
+    return receipt.commits === undefined
+      ? {
+          classification: 'one-descendant-commit',
+          baselineHead: original.head,
+          afterHead: after.head,
+          commitOid: after.head,
+        }
+      : {
+          classification: 'multiple-commits',
+          baselineHead: original.head,
+          afterHead: after.head,
+        };
   }
   return {
     classification: 'observation-ambiguous',
@@ -4829,19 +4939,33 @@ export function createPlaybookCaptainShell(
   const reportCarriedPreExistingChanges = (turn: ActiveTurn): void => {
     if (turn.carriedEffectPrefix !== undefined) return;
     let carried: readonly CarriedPreExistingChanges[];
+    let commitStatements: readonly string[];
     try {
       const ledger = assertPlaybookEffectLedger(currentEffectLedger());
       carried = carriedPreExistingChanges(ledger, presentedEffectPrefix);
+      commitStatements = stepCommitStatements(ledger, presentedEffectPrefix);
       turn.carriedEffectPrefix = ledger.boundaries.length;
     } catch {
       return;
     }
     const report = carriedPreExistingReport(carried);
-    if (report === undefined) return;
-    const facts = carriedPreExistingFacts(carried);
-    appendMandatoryPresentationSuffix(turn, report, facts);
-    for (const fact of facts) {
-      joinSettlementFact(turn, fact);
+    if (report !== undefined) {
+      const facts = carriedPreExistingFacts(carried);
+      appendMandatoryPresentationSuffix(turn, report, facts);
+      for (const fact of facts) {
+        joinSettlementFact(turn, fact);
+      }
+    }
+    // DR-088 §3: the commits each step took, read from the same boundaries.
+    if (commitStatements.length > 0) {
+      appendMandatoryPresentationSuffix(
+        turn,
+        commitStatements.join('\n'),
+        commitStatements,
+      );
+      for (const fact of commitStatements) {
+        joinSettlementFact(turn, fact);
+      }
     }
   };
 

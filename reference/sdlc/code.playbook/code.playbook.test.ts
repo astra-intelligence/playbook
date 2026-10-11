@@ -303,6 +303,9 @@ async function harness(fixtures: Partial<Fixtures> = {}) {
     createWriteAhead: () => ledgerService,
   });
   return {
+    repo,
+    players,
+    judges,
     ports,
     playerCalls,
     judgePrompts,
@@ -714,9 +717,78 @@ describe('linked CODE runtime', () => {
     await runtime.dispose();
   });
 
+  // DR-088 §1: a phase that made two commits takes the last as its commit
+  // and is reviewed from there; the receipt lists both.
+  it('accepts a directCommit candidate over two new commits', async () => {
+    const host = await harness({
+      players: [
+        { status: 'ok', finalText: 'Finished.', repositoryEffect: 'multiple' },
+      ],
+      judges: [{ guard: 'directCommit' }],
+      children: [approvedChild(1)],
+    });
+    const runtime = linkedRuntime(host);
+    await runtime.init(rootSession(host.ports));
+    try {
+      const result = await runtime.handleBossInput({
+        text: 'Fix it.',
+        signal: new AbortController().signal,
+      });
+      expect(host.commitOids).toHaveLength(2);
+      expect(host.effectLedger.snapshot().boundaries[0]?.physicalReceipt)
+        .toMatchObject({
+          classification: 'one-descendant-commit',
+          commitOid: host.commitOids[1],
+          commits: host.commitOids,
+        });
+      expect(host.childRequests[0]?.text).toContain(
+        `> Review scope: the commit ${host.commitOids[1]} from this coding phase and its resulting repository state.`,
+      );
+      expect(host.statuses).toContain('→ directCommit');
+      expect(result).toMatchObject({
+        outcome: 'terminal',
+        output: { lastCodeCommit: host.commitOids[1], allReviewsPassed: true },
+      });
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  // DR-088 §2: CODE's Coder declares no unchanged outcome, so a phase whose
+  // work already stands at HEAD takes that commit when the Coder names it.
+  it('accepts a directCommit candidate naming the commit already at HEAD', async () => {
+    const host = await harness({ children: [approvedChild(1)] });
+    const head = await git(host.repo, 'rev-parse', 'HEAD');
+    host.players.push({
+      status: 'ok',
+      finalText: `The fix was already committed as ${head.slice(0, 8)}; nothing more to change.`,
+      repositoryEffect: 'unchanged',
+    });
+    host.judges.push({ guard: 'directCommit' });
+    const runtime = linkedRuntime(host);
+    await runtime.init(rootSession(host.ports));
+    try {
+      const result = await runtime.handleBossInput({
+        text: 'Fix it.',
+        signal: new AbortController().signal,
+      });
+      expect(host.commitOids).toEqual([]);
+      expect(host.effectLedger.snapshot().boundaries[0]?.physicalReceipt)
+        .toMatchObject({ classification: 'unchanged' });
+      expect(host.childRequests[0]?.text).toContain(
+        `> Review scope: the commit ${head} from this coding phase and its resulting repository state.`,
+      );
+      expect(result).toMatchObject({
+        outcome: 'terminal',
+        output: { lastCodeCommit: head, allReviewsPassed: true },
+      });
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
   it.each([
     ['worktree', 'worktree-only-change'],
-    ['multiple', 'multiple-commits'],
     ['rewritten', 'rewritten-or-non-descendant'],
     ['residual', 'observation-ambiguous'],
   ] as const)(
