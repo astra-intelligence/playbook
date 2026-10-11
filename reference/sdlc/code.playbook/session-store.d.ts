@@ -285,7 +285,19 @@ export interface SharedSessionStore {
   migrateLegacyDefault(options?: { env?: Readonly<Record<string, string | undefined>>; homeDir?: string }): Promise<{ sourceDir: string; migrated: readonly string[]; skipped: readonly { sessionId: string; reason: string }[] }>;
   migrate(sessionId: string, options?: { sourcePath?: string; cwd?: string; backupDir?: string }): Promise<{ manifest: SessionManifest; migrated: boolean; reasons: readonly string[] }>;
 }
-export declare function createSessionStore(options?: { maxAssetBytes?: number; sessionsDir?: string; env?: Readonly<Record<string, string | undefined>>; homeDir?: string; [key: string]: any }): SharedSessionStore;
+export declare function createSessionStore(options?: {
+  maxAssetBytes?: number;
+  sessionsDir?: string;
+  /**
+   * Default `true`. `false` refuses, rather than creates, a missing sessions directory or ancestor when preparing
+   * session payload, lease, asset or migration directories. Machine-identity provisioning keeps its own rule and may
+   * still create its directory, including an ancestor it shares with the sessions directory.
+   */
+  createSessionsDir?: boolean;
+  env?: Readonly<Record<string, string | undefined>>;
+  homeDir?: string;
+  [key: string]: any;
+}): SharedSessionStore;
 export declare function validateSessionManifest(value: unknown): SessionManifest;
 export declare function validateSessionContext(value: unknown): SessionContext;
 export declare function projectCaptainSessionStructure(value: SessionExecutionProjection): SessionStructuralProjection;

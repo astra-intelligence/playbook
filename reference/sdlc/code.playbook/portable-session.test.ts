@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, mkdtemp, readFile, writeFile, mkdir, readdir, rm, stat, symlink, link, rename, unlink } from 'node:fs/promises';
+import { chmod, lstat, mkdtemp, readFile, writeFile, mkdir, readdir, rm, stat, symlink, link, rename, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
@@ -712,4 +712,144 @@ it('refuses undeclared, absent and corrupt session assets without discarding rea
  await writeFile(file,saved);const path=join(store.sessionsDir,`${id}.assets`,reference.assetId.slice(7));await writeFile(path,'corrupt');
  expect((await store.validate(id)).resumable).toBe(false);await expect(store.exportBundle(id)).rejects.toThrow('integrity');
  await rm(path);expect((await store.validate(id)).resumable).toBe(false);expect((await store.readHistory(id)).entries.some(({record})=>record.type==='playbook_evidence')).toBe(true);
+});
+
+describe('host-prepared sessions directories (session-storage-14)', () => {
+ async function prepared(create = true) {
+  const root=await mkdtemp(join(tmpdir(),'portable-session-'));roots.push(root);
+  const clone=join(root,'clone');const sessionsDir=join(clone,'sessions');
+  if(create){await mkdir(sessionsDir,{recursive:true,mode:0o700});await chmod(sessionsDir,0o700);}
+  return {root,clone,sessionsDir,moved:join(root,'moved')};
+ }
+ const absent=async(path:string)=>{await expect(stat(path)).rejects.toMatchObject({code:'ENOENT'});};
+ // Holds the acquisition's permission-preparation listing, an await before staging.
+ function heldListing(sessionsDir:string){
+  let reached!:()=>void;let resume!:()=>void;let held=false;
+  const atHold=new Promise<void>((resolve)=>{reached=resolve;});const released=new Promise<void>((resolve)=>{resume=resolve;});
+  const fsOps={async readdir(path:any,...rest:any[]){const names=await (readdir as any)(path,...rest);if(!held&&path===sessionsDir){held=true;reached();await released;}return names;}};
+  return {fsOps,atHold,resume};
+ }
+
+ it('creates a missing directory and parent by default, refuses them with createSessionsDir false, and works once they exist',async()=>{
+  const {root,clone,sessionsDir}=await prepared(false);const id=randomUUID();
+  for(const invalid of ['no',null,0]) expect(()=>createSessionStore({sessionsDir,createSessionsDir:invalid as any})).toThrow(TypeError);
+  const strict=createSessionStore({sessionsDir,createSessionsDir:false});
+  for(const operation of ['acquire','acquireManagement','delete'] as const){
+   await expect(strict[operation](id)).rejects.toThrow(/may not create it/);await absent(clone);
+  }
+  await expect(strict.migrate(id)).rejects.toThrow();await absent(clone);
+  const lease=await createSessionStore({sessionsDir}).acquire(id);
+  expect((await stat(sessionsDir)).mode&0o777).toBe(0o700);
+  await lease.initializeSettledWithPredecessor(freshBoundary() as any);await lease.release();
+  const again=await strict.acquire(id);
+  const first=await again.importAsset({bytes:Buffer.from('one'),mimeType:'text/plain'});
+  const second=await again.importAsset({bytes:Buffer.from('two'),mimeType:'text/plain'});
+  const prior=await again.read();const attemptId=randomUUID();
+  await again.beginTurn({input:'',attachments:[first,second],attemptId,attemptedExecutionProjection:prior!.lastAppliedExecutionProjection});
+  await again.discard({attemptId});await again.release();
+  expect((await strict.validate(id)).resumable).toBe(true);
+  const management=await strict.acquireManagement(id);await management.release();
+  // A migration source store it opens inherits the policy.
+  const gone=join(root,'gone');
+  await expect(strict.migrate(id,{sourcePath:join(gone,'sessions',`${id}.json`)})).rejects.toThrow(/may not create it/);await absent(gone);
+  await strict.delete(id);
+  expect((await readdir(sessionsDir)).filter((name)=>name.startsWith(id))).toEqual([]);
+ });
+
+ it('keeps the default store recreating a directory removed during a held acquisition',async()=>{
+  const {clone,sessionsDir}=await prepared();const hold=heldListing(sessionsDir);
+  const store=createSessionStore({sessionsDir,fsOps:hold.fsOps});
+  const pending=store.acquire(randomUUID());await hold.atHold;await rm(clone,{recursive:true});hold.resume();
+  await (await pending).release();
+  expect((await lstat(sessionsDir)).mode&0o777).toBe(0o700);
+ });
+
+ it.each([
+  ['acquire','removed'],['acquire','moved'],
+  ['acquireManagement','removed'],['acquireManagement','moved'],
+  ['delete','removed'],['delete','moved'],
+ ] as const)('%s leaves a directory %s during the held acquisition absent, then succeeds once it is restored',async(operation,change)=>{
+  const {clone,sessionsDir,moved}=await prepared();const hold=heldListing(sessionsDir);
+  const store=createSessionStore({sessionsDir,createSessionsDir:false,fsOps:hold.fsOps});const id=randomUUID();
+  const pending=store[operation](id);await hold.atHold;
+  if(change==='removed')await rm(clone,{recursive:true});else await rename(clone,moved);
+  hold.resume();
+  await expect(pending).rejects.toThrow(/may not create it/);await absent(clone);
+  if(change==='moved')expect(await readdir(join(moved,'sessions'))).toEqual([]);
+  await mkdir(sessionsDir,{recursive:true,mode:0o700});await chmod(sessionsDir,0o700);
+  const retried:any=await store[operation](id);await retried?.release();
+  expect((await readdir(sessionsDir)).filter((name)=>name.startsWith(`.${id}.lock.retired.`))).toHaveLength(1);
+ });
+
+ it('refuses a migration into a missing directory and releases its source lease',async()=>{
+  const f=await legacyDefaultFixture();const strict=createSessionStore({...f.options,createSessionsDir:false});
+  await expect(strict.migrateLegacyDefault()).rejects.toThrow(/may not create it/);
+  await absent(join(f.root,'home'));expect(await readFile(f.sourcePath,'utf8')).toBe(f.sourceBytes);
+  expect(await createSessionStore({sessionsDir:f.sourceDir}).readLeaseState(f.id)).toBe('idle');
+  await mkdir(f.options.sessionsDir,{recursive:true,mode:0o700});await chmod(f.options.sessionsDir,0o700);
+  expect((await strict.migrateLegacyDefault()).migrated).toEqual([f.id]);
+  expect((await strict.validate(f.id)).resumable).toBe(true);
+ });
+
+ it('reports a mid-migration refusal to recreate the backup parent past the failed lease release',async()=>{
+  const {root,store,id,lease,file}=await fixture();const legacy=await lease.read();await lease.release();
+  const original=JSON.stringify(legacy);await writeFile(file,original);
+  const inputs=join(root,'local','migrations',id,'inputs');const moved=`${root}.moved`;roots.push(moved);let vanished=false;
+  const strict=createSessionStore({sessionsDir:store.sessionsDir,createSessionsDir:false,fsOps:{async lstat(path:any){
+   if(!vanished&&path===inputs){vanished=true;await rename(root,moved);}
+   return lstat(path);
+  }}});
+  const failure=await strict.migrate(id).then(()=>undefined,(error)=>error);
+  expect(vanished).toBe(true);expect(failure).toBeInstanceOf(AggregateError);
+  expect(failure.errors[0].message).toMatch(/may not create it/);expect(failure.errors).toHaveLength(2);
+  await absent(root);await rename(moved,root);expect(await readFile(file,'utf8')).toBe(original);
+ });
+
+ it('reports a deletion failure past the failed lease release once the directory disappears',async()=>{
+  const {clone,sessionsDir}=await prepared();const id=randomUUID();const leaseDir=join(sessionsDir,`.${id}.lock`);let vanished=false;
+  const store=createSessionStore({sessionsDir,createSessionsDir:false,fsOps:{async lstat(path:any){
+   if(!vanished&&path===leaseDir&&new Error().stack?.includes('assertOwner')){vanished=true;await rm(clone,{recursive:true});}
+   return lstat(path);
+  }}});
+  const failure=await store.delete(id).then(()=>undefined,(error)=>error);
+  expect(vanished).toBe(true);expect(failure).toBeInstanceOf(AggregateError);
+  expect(failure.errors[0].code).toBe('ENOENT');expect(failure.errors).toHaveLength(2);await absent(clone);
+ });
+
+ it('refuses record and asset writes through a held lease after the directory disappears',async()=>{
+  const {clone,sessionsDir}=await prepared();const id=randomUUID();const assetOwner=randomUUID();
+  let vanishAtRecordWrite=false;let ownerChecks=-1;
+  const ownerFile=join(sessionsDir,`.${assetOwner}.lock`,'owner.json');
+  const store=createSessionStore({sessionsDir,createSessionsDir:false,fsOps:{async lstat(path:any){
+   // The record writer's directory check is the await held here.
+   if(vanishAtRecordWrite&&path===sessionsDir&&new Error().stack?.includes('ensurePrivateDirectory')){vanishAtRecordWrite=false;await rm(clone,{recursive:true});}
+   const result=await lstat(path);
+   // The asset import's owner check ends with the second owner-file check.
+   if(ownerChecks>=0&&path===ownerFile&&++ownerChecks===2){ownerChecks=-1;await rm(clone,{recursive:true});}
+   return result;
+  }}});
+  const lease=await store.acquire(id);await lease.initializeSettledWithPredecessor(freshBoundary() as any);
+  const prior=await lease.read();vanishAtRecordWrite=true;
+  await expect(lease.beginTurn({input:'next',attemptId:randomUUID(),attemptedExecutionProjection:prior!.lastAppliedExecutionProjection})).rejects.toThrow(/may not create it/);
+  expect(vanishAtRecordWrite).toBe(false);await absent(clone);
+  await expect(lease.release()).rejects.toThrow();await absent(clone);
+  await mkdir(sessionsDir,{recursive:true,mode:0o700});await chmod(sessionsDir,0o700);
+  const owner=await store.acquire(assetOwner);ownerChecks=0;
+  await expect(owner.importAsset({bytes:Buffer.from('late'),mimeType:'text/plain'})).rejects.toThrow(/ENOENT/);
+  expect(ownerChecks).toBe(-1);await absent(clone);
+ });
+
+ it('reports the primary failure when the directory moves after staging',async()=>{
+  const {clone,sessionsDir,moved}=await prepared();let staged=false;
+  const store=createSessionStore({sessionsDir,createSessionsDir:false,fsOps:{async mkdir(path:any,options:any){
+   const result=await mkdir(path,options);
+   if(!staged&&String(path).includes('.lock.stage.')){staged=true;await rename(clone,moved);}
+   return result;
+  }}});
+  const id=randomUUID();const failure=await store.acquire(id).then(()=>undefined,(error)=>error);
+  expect(staged).toBe(true);expect(failure).not.toBeInstanceOf(AggregateError);
+  expect(failure.message).toMatch(/^cannot acquire Captain session .* lease: ENOENT: .*chmod/);
+  await absent(clone);
+  await rename(moved,clone);const retried=await store.acquire(id);await retried.release();
+ });
 });

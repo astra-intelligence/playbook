@@ -10,8 +10,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `createSessionStore` from `@sublang/playbook/session-store` accepts an
+  optional boolean `createSessionsDir`. The default `true` keeps creating a
+  missing sessions directory and its parents. A host that prepared the
+  directory passes `false`: acquisition, management, deletion, migration
+  (including its source store), record writes and asset imports then refuse
+  a missing directory, even when it moves or disappears mid-operation,
+  without preparing missing session directories or their parents;
+  machine-identity provisioning keeps its existing rule. Lock-staging and
+  asset directories are still created singly inside the existing directory,
+  and the same store works again once the directory is restored
+  ([[session-storage-11](specs/packages/session-storage.md#session-storage-11)],
+  [[playbook-cli-97](specs/packages/playbook-cli.md#playbook-cli-97)]).
+
 ### Fixed
 
+- Report the original failure of a session deletion or migration when
+  releasing its lease then also fails, as an `AggregateError` listing that
+  failure first, instead of replacing it with the release error
+  ([[session-storage-11](specs/packages/session-storage.md#session-storage-11)]).
 - Read the machine identity file again at the next lease or claim after a
   refusal, so a session store or repository coordinator recovers once an
   unreadable or malformed file is repaired instead of repeating the first
