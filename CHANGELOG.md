@@ -10,6 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Captain asks a step's question in its own words and reports a
+  step's ending as the step gave it.** The closing reply reworded a
+  playbook's one question, added a second ask, or echoed a settlement fact
+  into it, and dropped or renamed the paths, record ids, commit hashes,
+  and names a finished step reported. Its prompt now ends each relayed
+  question with that question's own asking sentence, unchanged, with any
+  explanation before it and no other question or settlement fact, and has
+  the reply give every fact a step reported, as reported and before any
+  comment on them, leaving none out and adding none
+  ([[captain-playbook-5](specs/packages/captain-playbook.md#captain-playbook-5)]).
+
 ## [17.8.0] - 2026-10-11
 
 ### Added
