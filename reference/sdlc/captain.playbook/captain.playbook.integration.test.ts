@@ -501,7 +501,7 @@ describe('captain.playbook acting turns (CAPPLAY-9, CAPPLAY-10, CAPPLAY-13)', ()
     await harness.runtime.dispose();
   });
 
-  it('pins the result-phase grounding instruction and saved-counts gating (CAPPLAY-20 pin 5)', async () => {
+  it('pins the result-phase grounding instruction, saved-counts gating, and question and step-fact rules (CAPPLAY-20 pins 5 and 8)', async () => {
     const harness = makeHarness({
       captains: [json(START_REPLY), ok('closing reply')],
     });
@@ -523,6 +523,19 @@ describe('captain.playbook acting turns (CAPPLAY-9, CAPPLAY-10, CAPPLAY-13)', ()
     expect(prompt).toContain(
       'When mentioning progress detail, use only the aggregate counts the report supplies.',
     );
+    // (8) a relayed question ends with its own words; a step's ending
+    // carries every fact the step reported.
+    expect(prompt).toContain(
+      "Name who is asking and give all choices, constraints, and uncertainty needed to answer, then end with the question's own asking sentence, unchanged; add no other question and no settlement fact.",
+    );
+    expect(prompt).toContain(
+      "When a step's ending is supplied, give every fact that step reported — paths, record ids, commit hashes, names — as it gave them, before anything you say about them; leave none out and add none.",
+    );
+    // No sentence of the prompt asks for the opposite.
+    expect(prompt).not.toContain('state the actual decision Boss must make');
+    expect(prompt).not.toContain('lead with who is asking');
+    expect(prompt).not.toContain('actual question first');
+    expect(prompt).not.toContain('Never repeat jargon');
     await harness.runtime.dispose();
   });
 
