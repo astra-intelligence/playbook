@@ -616,24 +616,29 @@ describe('linked DEV runtime', () => {
       resumed ? 'analyst-question' : false,
     ]);
     const prompt = host.playerCalls[2]!.prompt;
-    expect(prompt).toContain('Boss reply:\nYes, wait for the freeze and stop planning.');
+    expect(prompt).toContain('Boss ⟶\nYes, wait for the freeze and stop planning.');
     expect(prompt).toContain('> Original request: Should we redesign the trace format?');
     expect(prompt.split('Should we redesign the trace format?')).toHaveLength(2);
     expect(prompt.includes('Should this wait for the release freeze?')).toBe(!resumed);
     expect(prompt).not.toContain('Boss question:');
     const priorDiscussion = '> Prior discussion: Analyst question: Should the analysis cover rendering or storage?\n> Boss reply: Cover storage only; leave rendering unchanged.';
     expect(prompt).toContain(priorDiscussion);
-    expect(prompt.split('Should the analysis cover rendering or storage?')).toHaveLength(2);
+    // DR-090 §1: the run's first exchange leads the call too, beside the
+    // Source's own retained discussion.
+    expect(prompt).toContain(
+      '? ⟶\nShould the analysis cover rendering or storage?\n\nBoss ⟶\nCover storage only; leave rendering unchanged.\n\n',
+    );
+    expect(prompt.split('Should the analysis cover rendering or storage?')).toHaveLength(3);
     expect(prompt).toContain('> Run results: Trace integration checks passed.');
     const full = host.playerCalls[2]!.freshPrompt ?? prompt;
     expect(full).toContain(priorDiscussion);
-    expect(full.split('Should the analysis cover rendering or storage?')).toHaveLength(2);
+    expect(full.split('Should the analysis cover rendering or storage?')).toHaveLength(3);
     expect(full).toContain('> Run results: Trace integration checks passed.');
-    expect(full).toContain('Your previous question:\nShould this wait for the release freeze?');
+    expect(full).toContain('? ⟶\nShould this wait for the release freeze?');
     expect(full.split('Should we redesign the trace format?')).toHaveLength(2);
     const calls = host.telemetry.filter(({ topic }) => topic === 'playbook.trace').map(({ payload }) => payload as any).filter(({ type }) => type === 'player.call.started');
     expect(calls[2]?.payload.prompt).toBe(prompt);
-    if (!resumed) expect(prompt).toContain('Your previous question:\nShould this wait for the release freeze?');
+    if (!resumed) expect(prompt).toContain('? ⟶\nShould this wait for the release freeze?');
     expect(host.childRequests).toEqual([]);
     await runtime.dispose();
   });

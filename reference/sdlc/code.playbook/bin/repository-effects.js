@@ -779,6 +779,23 @@ async function resolveHead(worktree, env) {
   }
 }
 
+// DR-090 §4: the branch HEAD names, or undefined when HEAD is detached:
+// `symbolic-ref --quiet` exits 1 without output for a detached HEAD, and
+// every other failure stays a failure.
+async function resolveBranch(worktree, env) {
+  try {
+    const branch = await runGitText(
+      worktree,
+      ['symbolic-ref', '--quiet', '--short', 'HEAD'],
+      { env },
+    );
+    return branch.length === 0 ? undefined : branch;
+  } catch (error) {
+    if (error?.code === 1 && error.stdout?.length === 0) return undefined;
+    throw error;
+  }
+}
+
 function gitFailureSays(error, exitCode, text) {
   return (
     typeof error === 'object' &&
@@ -862,20 +879,25 @@ export async function resolveCanonicalGitWorktree(cwd) {
 }
 
 async function sampleWorktree(worktree, env) {
-  const [headResult, visibilityResult, statusResult] = await Promise.allSettled([
+  // A directory that is not a repository yet names no branch: its scratch
+  // repository's HEAD is not the worktree's.
+  const [headResult, branchResult, visibilityResult, statusResult] = await Promise.allSettled([
     resolveHead(worktree, env),
+    env === undefined ? resolveBranch(worktree, env) : Promise.resolve(undefined),
     rawIndexVisibility(worktree, env),
     rawRepositoryStatus(worktree, env),
   ]);
   if (headResult.status === 'rejected') throw headResult.reason;
+  if (branchResult.status === 'rejected') throw branchResult.reason;
   if (visibilityResult.status === 'rejected') throw visibilityResult.reason;
   const head = headResult.value;
+  const branch = branchResult.value;
   const indexVisibility = visibilityResult.value;
   assertIndexVisibility(indexVisibility);
   if (statusResult.status === 'rejected') throw statusResult.reason;
   const status = statusResult.value;
   const projection = await projectionFromStatus(worktree, status);
-  return { head, indexVisibility, status, projection };
+  return { head, branch, indexVisibility, status, projection };
 }
 
 async function observeWorktreeSamples(identity, env, options) {
@@ -885,6 +907,7 @@ async function observeWorktreeSamples(identity, env, options) {
   const beforeText = projectionText(before.projection);
   if (
     before.head !== after.head ||
+    before.branch !== after.branch ||
     !before.indexVisibility.equals(after.indexVisibility) ||
     !before.status.equals(after.status) ||
     beforeText !== projectionText(after.projection)
@@ -895,6 +918,7 @@ async function observeWorktreeSamples(identity, env, options) {
     worktree: identity.worktree,
     gitDir: identity.gitDir,
     head: before.head,
+    ...(before.branch === undefined ? {} : { branch: before.branch }),
     projection: before.projection,
     projectionDigest: `sha256:${sha256(beforeText)}`,
   });

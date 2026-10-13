@@ -619,16 +619,16 @@ describe('linked BRANCH runtime', () => {
         resumed ? 'coder-question' : false,
       ]);
       const prompt = host.playerCalls[1]!.prompt;
-      expect(prompt).toContain('Boss reply:\nIssue #12.');
+      expect(prompt).toContain('Boss ⟶\nIssue #12.');
       expect(prompt).toContain(
         '> Original request: Branch for the retry issue.',
       );
       expect(prompt.split('Branch for the retry issue.')).toHaveLength(2);
-      expect(prompt.includes(`Your previous question:\n${question}`)).toBe(
+      expect(prompt.includes(`? ⟶\n${question}`)).toBe(
         !resumed,
       );
       const full = host.playerCalls[1]!.freshPrompt ?? prompt;
-      expect(full).toContain(`Your previous question:\n${question}`);
+      expect(full).toContain(`? ⟶\n${question}`);
       expect(full).toContain('> Original request: Branch for the retry issue.');
       // The answer continuation is its own separately governed unchanged
       // boundary that keeps the original baseline.

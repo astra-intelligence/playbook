@@ -29,6 +29,7 @@ export interface RepositoryIdentity {
 }
 export interface PlaybookRepositoryObservation extends RepositoryIdentity {
   readonly head: string;
+  readonly branch?: string;
   readonly projection: Readonly<Record<string, JsonValue>>;
   readonly projectionDigest: string;
 }

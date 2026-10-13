@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([DR-091](specs/decisions/091-an-unrevealed-shape-is-the-machines-to-judge.md),
   [[playbook-runtime-48](specs/packages/playbook-runtime.md#playbook-runtime-48)],
   [[playbook-runtime-77](specs/packages/playbook-runtime.md#playbook-runtime-77)]).
+- **Every role hears the Boss (W-56).** Every player call after a Boss reply now carries the run's Boss exchanges — each question as asked and each reply verbatim, in order — whatever its role and whether or not its Source retains them, and the exchanges survive a restore ([DR-090](specs/decisions/090-every-role-hears-the-boss.md), [[playbook-runtime-104](specs/packages/playbook-runtime.md#playbook-runtime-104)]).
+- **Boss exchanges and the shell's report lines read as structure in any language (W-58).** A question follows a `? ⟶` line and a reply a `Boss ⟶` line, with no English sentence; the commit, failure and control lines the Captain shell appends to a reply carry marks and identifiers (`✓`, `✕ <code>`, `▸ <label>`) while the closing reply's facts keep their words ([[playbook-runtime-92](specs/packages/playbook-runtime.md#playbook-runtime-92)], [[playbook-captain-67](specs/packages/playbook-captain.md#playbook-captain-67)]).
+- **The closing reply names each commit's hash and branch (W-59).** Repository observations record the branch HEAD names, a step's one new commit joins the closing reply's facts as `The step made one new commit, <oid>, on branch <branch>.`, and the closing-reply prompt names each commit by hash and branch ([[playbook-captain-83](specs/packages/playbook-captain.md#playbook-captain-83)], [[captain-playbook-5](specs/packages/captain-playbook.md#captain-playbook-5)]).
+- **A player knows its role and model (W-54b).** Every player prompt opens with `Role: <role> · Model: <model>`, the model as the host's binding configures it, so a commit trailer can name both ([[playbook-runtime-105](specs/packages/playbook-runtime.md#playbook-runtime-105)]).
 
 ## [17.8.1] - 2026-10-11
 

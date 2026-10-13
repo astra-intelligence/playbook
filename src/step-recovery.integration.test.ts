@@ -183,7 +183,8 @@ describe('interrupted-step recovery with real Git', () => {
           const ports: PlaybookPorts = {
             callPlayer: async (_role, prompt) => {
               calls.push(prompt);
-              if (prompt.startsWith('First:')) {
+              // DR-090 §3: the body follows the role line.
+              if (prompt.replace(/^Role: [^\n]*\n\n/, '').startsWith('First:')) {
                 await writeFile(join(cwd, 'file.txt'), 'completed\n');
                 git('add', '.');
                 git('commit', '-qm', 'first step');

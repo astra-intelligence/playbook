@@ -637,7 +637,7 @@ describe('linked PR runtime', () => {
     expect(host.playerCalls).toHaveLength(1);
     expect(host.playerCalls[0]).toMatchObject({ playerId: 'coder', resume: false });
     // The prefix pass puts the instructions first and the relay last (DR-065).
-    expect(host.playerCalls[0]?.prompt.startsWith('Publish the branch')).toBe(true);
+    expect(host.playerCalls[0]?.prompt.startsWith('Role: coder · Model: Claude Opus 5\n\nPublish the branch')).toBe(true);
     expect(host.playerCalls[0]?.prompt).toContain(
       `with its reason.\n\n> Original request: ${CALLER_INPUT.replaceAll('\n', '\n> ')}`,
     );
@@ -958,7 +958,7 @@ describe('linked PR runtime', () => {
       'coder-question',
     ]);
     const prompt = host.playerCalls[1]!.prompt;
-    expect(prompt).toContain('Boss reply:\nPush to origin.');
+    expect(prompt).toContain('Boss ⟶\nPush to origin.');
     expect(prompt).toContain(`> Original request: ${CALLER_INPUT.replaceAll('\n', '\n> ')}`);
     expect(prompt.split(CALLER_INPUT.split('\n')[0]!)).toHaveLength(2);
     expect(acceptedOutcomes(host)).toEqual([

@@ -4051,7 +4051,7 @@ describe('DR-032 shared role runtime transition', () => {
     expect(calls).toEqual([
       {
         roleId: 'coder',
-        prompt: 'GPT-5.6 Sol\n\nImplement the change.',
+        prompt: 'Role: coder · Model: GPT-5.6 Sol\n\nGPT-5.6 Sol\n\nImplement the change.',
         resume: false,
       },
     ]);
@@ -4097,7 +4097,7 @@ describe('DR-032 shared role runtime transition', () => {
     await restored.handleBossInput(bossTurn('the follow-up'));
     expect(calls[1]).toEqual({
       roleId: 'coder',
-      prompt: 'Claude Opus 5\n\nImplement the follow-up.',
+      prompt: 'Role: coder · Model: Claude Opus 5\n\nClaude Opus 5\n\nImplement the follow-up.',
       resume: 'thread-1',
     });
     expect(JSON.stringify(restored.exportSnapshot?.())).not.toContain(

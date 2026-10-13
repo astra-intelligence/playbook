@@ -13,6 +13,7 @@ import {
 
 import { assertPlaybookFailureCause } from './runtime.js';
 import type {
+  PlaybookBossExchange,
   CaptainResult,
   JsonValue,
   NormalizedError,
@@ -992,6 +993,20 @@ function effectInteger(value: unknown, path: string, minimum = 0): number {
   return value as number;
 }
 
+// DR-090 §4: an observation's branch is evidence for the Boss only; two
+// observations of one repository state are equal whatever branch each names.
+function observedStatesEqual(
+  left: PlaybookRepositoryObservation,
+  right: PlaybookRepositoryObservation,
+): boolean {
+  const { branch: _left, ...leftState } = left;
+  const { branch: _right, ...rightState } = right;
+  return jsonValuesEqual(
+    leftState as unknown as JsonValue,
+    rightState as unknown as JsonValue,
+  );
+}
+
 function jsonValuesEqual(left: JsonValue, right: JsonValue): boolean {
   if (Object.is(left, right)) return true;
   if (Array.isArray(left) || Array.isArray(right)) {
@@ -1110,7 +1125,7 @@ function effectObservation(
   if (!isRecord(value)) throw new TypeError(`${path} must be an object`);
   rejectUnknownKeys(
     value,
-    ['worktree', 'gitDir', 'head', 'projection', 'projectionDigest'],
+    ['worktree', 'gitDir', 'head', 'branch', 'projection', 'projectionDigest'],
     path,
   );
   requireNonEmptyString(value.worktree, `${path}.worktree`);
@@ -1118,6 +1133,10 @@ function effectObservation(
   const head = requireNonEmptyString(value.head, `${path}.head`);
   if (!EFFECT_OID_PATTERN.test(head)) {
     throw new TypeError(`${path}.head must be a canonical Git commit OID`);
+  }
+  // DR-090 §4: the branch HEAD names, evidence for the Boss only.
+  if (own(value, 'branch')) {
+    requireNonEmptyString(value.branch, `${path}.branch`);
   }
   if (!isRecord(value.projection)) {
     throw new TypeError(`${path}.projection must be a path-keyed object`);
@@ -1252,10 +1271,7 @@ function effectReceipt(
   if (
     classification === 'unchanged' &&
     after !== undefined &&
-    !jsonValuesEqual(
-      baseline as unknown as JsonValue,
-      after as unknown as JsonValue,
-    )
+    !observedStatesEqual(baseline, after)
   ) {
     throw new TypeError(`${path} classified unchanged observations that differ`);
   }
@@ -2100,7 +2116,7 @@ function effectBoundary(value: unknown, index: number): PlaybookEffectBoundary {
   }
   if (own(value, 'restored')) {
     const restored = effectObservation(value.restored, `${path}.restored`);
-    if (!jsonValuesEqual(restored as unknown as JsonValue, baseline as unknown as JsonValue) ||
+    if (!observedStatesEqual(restored, baseline) ||
         !isRecord(value.physicalReceipt) || after?.head !== baseline.head ||
         (value.dispositions as string[]).some((item) => item !== 'unchanged') ||
         value.cohortId !== undefined || value.logicalOperationId !== undefined) {
@@ -2238,10 +2254,7 @@ function effectLogicalOperation(
     if (
       previous.physicalReceipt === undefined ||
       previous.after === undefined ||
-      !jsonValuesEqual(
-        boundary.baseline as unknown as JsonValue,
-        previous.after as unknown as JsonValue,
-      )
+      !observedStatesEqual(boundary.baseline, previous.after)
     ) {
       throw new TypeError(
         `${path}.boundaryIds must form one completed checkpoint chain`,
@@ -2260,10 +2273,7 @@ function effectLogicalOperation(
     );
     if (
       latestAfter === undefined ||
-      !jsonValuesEqual(
-        checkpoint as unknown as JsonValue,
-        latestAfter as unknown as JsonValue,
-      )
+      !observedStatesEqual(checkpoint, latestAfter)
     ) {
       throw new TypeError(`${path}.checkpoint must equal its latest boundary after`);
     }
@@ -2738,6 +2748,7 @@ export function assertPlaybookRuntimeSnapshot(
       'failedEffectAttempt',
       'recoveryCheckpoint',
       'suspendedCall',
+      'bossExchanges',
     ],
     'runtime snapshot',
   );
@@ -3045,6 +3056,22 @@ export function assertPlaybookRuntimeSnapshot(
     }
     recoveryCheckpoint = Object.freeze({stateId, prompt, boundaryPrefix, machine: snapshotJsonValue(checkpoint.machine), ...(own(checkpoint, 'id') ? { id: effectUuid(checkpoint.id, 'recoveryCheckpoint.id') } : {}), ...(own(checkpoint, 'result') ? { result: snapshotJsonValue(checkpoint.result) } : {}), ...(checkpoint.delivered === true ? { delivered: true as const } : {})});
   }
+  // DR-090 §1: the run's Boss exchanges, present only when there is one.
+  let bossExchanges: readonly PlaybookBossExchange[] | undefined;
+  if (own(snapshot, 'bossExchanges')) {
+    const list = snapshot.bossExchanges;
+    if (!Array.isArray(list) || list.length === 0) {
+      throw new TypeError('runtime snapshot bossExchanges must be a nonempty list');
+    }
+    bossExchanges = Object.freeze(list.map((exchange: unknown, index: number) => {
+      const path = `runtime snapshot bossExchanges[${index}]`;
+      if (!isRecord(exchange)) throw new TypeError(`${path} must be an object`);
+      rejectUnknownKeys(exchange, ['question', 'reply'], path);
+      const question = requireNonEmptyString(exchange.question, `${path}.question`);
+      const reply = requireNonEmptyString(exchange.reply, `${path}.reply`);
+      return Object.freeze({ question, reply });
+    }));
+  }
   const fields = {
     playbookId,
     machine,
@@ -3068,6 +3095,7 @@ export function assertPlaybookRuntimeSnapshot(
     schemaVersion: 4,
     ...fields,
     ...(suspendedCall === undefined ? {} : { suspendedCall }),
+    ...(bossExchanges === undefined ? {} : { bossExchanges }),
   });
 }
 

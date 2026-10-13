@@ -38,6 +38,8 @@ function adapterFor(evidence: Evidence) {
     readonly agent = 'claude-code';
     async *run(prompt: string, options?: AgentOptions): AsyncGenerator<AgentEvent> {
       let result: string;
+      // DR-090 §3: a player prompt opens with its role line.
+      const body = prompt.replace(/^Role: [^\n]*\n\n/, '');
       if (prompt.includes('Check whether existing instructions already answer')) {
         result = '{"instructionIndex":null}';
       } else if (prompt.includes('Select exactly one action from the closed set')) {
@@ -64,13 +66,13 @@ function adapterFor(evidence: Evidence) {
           ? 'One material finding: the committed feature says broken; fix it.'
           : 'Review complete. No unsettled findings remain for the exact supplied committed scope.';
         if (evidence.marker === 'CLEAN') evidence.reviewRevision = await git(evidence.cwd, 'rev-parse', 'HEAD');
-      } else if (prompt.startsWith('For each review item')) {
+      } else if (body.startsWith('For each review item')) {
         await writeFile(join(evidence.cwd, 'feature.txt'), 'fixed\n');
         await git(evidence.cwd, 'add', 'feature.txt');
         await git(evidence.cwd, 'commit', '-qm', 'fix: answer the bound review');
         evidence.marker = 'FIXED';
         result = 'Accepted and fixed the material finding in one review-fix commit.';
-      } else if (prompt.startsWith('First determine whether')) {
+      } else if (body.startsWith('First determine whether')) {
         evidence.coderPrompts.push(prompt);
         await writeFile(join(evidence.cwd, 'feature.txt'), 'broken\n');
         await writeFile(join(evidence.cwd, 'intent.md'), 'IR-040 task 1 complete; bound independent review pending.\nTask 2 needs a new owner target decision.\n');
@@ -95,7 +97,7 @@ function adapterFor(evidence: Evidence) {
         expect(await git(evidence.cwd, 'status', '--porcelain=v1')).toBe('');
         expect(prompt).toContain('Before treating it as current review evidence, verify clean current HEAD equals its evaluatedRevision; a mismatch is not approval.');
         expect(prompt).toContain('It does not replace independent review of this task or any new owner or release decision.');
-        if (evidence.scenario !== 'pass' && !prompt.includes('Boss reply:')) {
+        if (evidence.scenario !== 'pass' && !prompt.includes('Boss ⟶')) {
           evidence.marker = 'QUESTION';
           result = 'Boss question: Which new local target should task 2 use? Prior task review does not authorize that owner choice.';
         } else {
@@ -192,7 +194,7 @@ describe('model-free prior-review relay through real CODE and REVIEW', () => {
       const resumed = evidence.coderPrompts[2]!.split('\n').find(l => l.startsWith('> Previous phase review: '));
       expect(resumed).toBe(first);
       expect(JSON.stringify(frozen)).toBe(first!.slice('> Previous phase review: '.length));
-      expect(evidence.coderPrompts[2]).toContain('Boss reply:');
+      expect(evidence.coderPrompts[2]).toContain('Boss ⟶');
       expect(evidence.reviewers).toBe(3);
       expect(codeTerminal(evidence)).toMatchObject({
         outcome: 'terminal', state: { stateId: 'done' }, output: { status: 'complete', allReviewsPassed: true },

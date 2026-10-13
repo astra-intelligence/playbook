@@ -363,9 +363,10 @@ describe('linked REVIEW runtime', () => {
       false,
       'reviewer-1',
     ]);
-    // DR-065: the instructions lead and the relayed caller input trails.
+    // DR-065: the instructions lead, after the role line (DR-090 §3), and
+    // the relayed caller input trails.
     expect(playerCalls[0].prompt.startsWith(
-      'A new review begins for the review scope.\n',
+      'Role: reviewer · Model: Claude Opus 5\n\nA new review begins for the review scope.\n',
     )).toBe(true);
     expect(playerCalls[0].prompt.endsWith(
       '\n\n> Original request: Review the feature.\n> Run result: focused suite passed.',
@@ -1043,10 +1044,10 @@ describe('linked REVIEW runtime', () => {
     expect(resumed?.playerId).toBe(scenario.resumedPlayer);
     expect(resumed?.options.resume).toBe(scenario.resumedToken);
     expect(resumed?.prompt).not.toContain(
-      'Your previous question:\nWhich release target should govern?',
+      '? ⟶\nWhich release target should govern?',
     );
     expect(resumed?.prompt).toContain(
-      'Boss reply:\nTarget version 6.0.0.',
+      'Boss ⟶\nTarget version 6.0.0.',
     );
     for (const prompt of [resumed?.prompt, resumed?.options.freshPrompt]) {
       // Every round relays the request whole.
@@ -1119,7 +1120,7 @@ describe('linked REVIEW runtime', () => {
       '> Original request: Review the replacement commit instead.',
     );
     expect(playerCalls[1]?.prompt).not.toContain('Boss question:');
-    expect(playerCalls[1]?.prompt).not.toContain('Boss reply:');
+    expect(playerCalls[1]?.prompt).not.toContain('Boss ⟶');
     await runtime.dispose();
   });
 
@@ -1227,7 +1228,7 @@ describe('linked REVIEW runtime', () => {
     });
     expect(failed.outcome).toBe('failed');
     expect(playerCalls.at(-1)?.prompt).toContain(
-      'Boss reply:\nTarget version 6.0.0.',
+      'Boss ⟶\nTarget version 6.0.0.',
     );
     const view = runtime.describe!();
     expect(view.state.stateId).toBe('failed');

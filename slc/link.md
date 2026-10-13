@@ -332,6 +332,7 @@ interface PlaybookRepositoryObservation {
   readonly worktree: string;
   readonly gitDir: string;
   readonly head: string;
+  readonly branch?: string;
   readonly projection: Readonly<Record<string, JsonValue>>;
   readonly projectionDigest: string;
 }
@@ -521,6 +522,13 @@ interface PlaybookRuntimeSnapshot {
   /** Interrupted invocation, captured before its external call (DR-069). */
   recoveryCheckpoint?: PlaybookRecoveryCheckpoint;
   suspendedCall?: PlaybookSuspendedCall;
+  /** The run's Boss exchanges so far, in order (DR-090). */
+  bossExchanges?: readonly PlaybookBossExchange[];
+}
+
+interface PlaybookBossExchange {
+  readonly question: string;
+  readonly reply: string;
 }
 
 type PlaybookRunResult =
@@ -1083,6 +1091,15 @@ The shared `composePlayerContinuation(input, body, resuming)` helper prefixes th
 A resumed call omits that question; a fresh call includes it before `Boss reply:`.
 Both retain the authored task body exactly once, with two newlines between blocks.
 These framework blocks never enter `invoke.input.prompt` or persisted FSM context.
+
+The shared runtime hands a composer the call's input without `pendingBossQuestion` and `bossReply` and builds the continuation itself, so a player of any language reads it as structure (DR-090).
+Before the composer's result it places, in order:
+
+- `Role: <roleId> · Model: <promptIdentity>`, naming the call's local role and its current binding's prompt identity, or `Role: <roleId>` alone without bindings;
+- once the run has heard a Boss reply, the run's Boss exchanges so far, each a `? ⟶` line and the verbatim question, then a `Boss ⟶` line and the verbatim reply, whatever the role and whether or not the Source retains them, leaving out the one exchange the call's own continuation carries;
+- for a call after a Boss reply, the marked verbatim question, only for a fresh conversation, and the marked verbatim reply.
+
+A run begins at the entry event or a finished machine's restart, and its exchanges travel in the runtime snapshot as `bossExchanges`.
 
 The runtime chooses the compact prompt only after selecting a conversation token and carries the complete prompt as optional `PlayerCallOptions.freshPrompt`.
 A host starting fresh after a definite pre-execution token rejection uses `freshPrompt`, when supplied, instead of the compact prompt.
@@ -1974,6 +1991,9 @@ At a safe capture point it shall return a JSON-safe
   `{ kind: 'captain' }` or `{ kind: 'role', roleId }`, empty when the
   parked state awaits no reply. This list exists so hosts can surface the
   question without parsing status lines or telemetry.
+- `bossExchanges`: omitted when the run has heard no Boss reply; otherwise
+  every `{ question, reply }` exchange of the run so far, in order, which
+  `restore` and adoption take back.
 - `suspendedCall`: omitted when no nested call is pending; otherwise the
   shared nested bridge's complete `callId`, source `stateId`, target
   `playbookId`, exact handed-off `text`, and `childSessionId`, enriched with

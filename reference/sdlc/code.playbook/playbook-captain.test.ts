@@ -790,6 +790,8 @@ const COMMITTED_BEFORE_FAILURE_OID = 'e'.repeat(40);
 // with `commits`, several new commits listed oldest first (DR-088).
 const COMMITTED_BEFORE_FAILURE_FIRST_OID = 'd1'.repeat(20);
 
+const COMMITTED_BEFORE_FAILURE_BRANCH = 'feature/intents';
+
 function committedBeforeFailureTestLedger(
   playbookId: string,
   runtimeSessionId: string,
@@ -803,7 +805,11 @@ function committedBeforeFailureTestLedger(
     projectionDigest:
       'sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a',
   };
-  const after = { ...baseline, head: COMMITTED_BEFORE_FAILURE_OID };
+  const after = {
+    ...baseline,
+    head: COMMITTED_BEFORE_FAILURE_OID,
+    branch: COMMITTED_BEFORE_FAILURE_BRANCH,
+  };
   return assertPlaybookEffectLedger({
     schemaVersion: 1,
     revision: 1,
@@ -848,20 +854,45 @@ function committedBeforeFailureTestLedger(
 // one whose call declares an unchanged outcome and one naming no commit.
 const STEP_FIRST_COMMIT = 'c1'.repeat(20);
 const STEP_LAST_COMMIT = 'e2'.repeat(20);
+const STEP_SINGLE_COMMIT = 'f3'.repeat(20);
+const STEP_BRANCH = 'feature/review-fixes';
 
-function stepCommitTestLedger(playbookId: string, runtimeSessionId: string) {
-  const observation = (head: string) => ({
+function stepCommitTestLedger(
+  playbookId: string,
+  runtimeSessionId: string,
+  oneCommit = false,
+) {
+  const observation = (head: string, branch?: string) => ({
     worktree: '/current/worktree',
     gitDir: '/current/worktree/.git',
     head,
+    ...(branch === undefined ? {} : { branch }),
     projection: {},
     projectionDigest:
       'sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a',
   });
   const base = observation(UNRESOLVED_EFFECT_BASELINE_HEAD);
-  const atHead = observation(STEP_LAST_COMMIT);
+  // DR-090 §4: the work landed on a branch the after observation names.
+  const atHead = observation(STEP_LAST_COMMIT, STEP_BRANCH);
+  const single = observation(STEP_SINGLE_COMMIT, STEP_BRANCH);
   const unchanged = { classification: 'unchanged', baseline: atHead, after: atHead };
-  const rows = [
+  const rows = oneCommit
+    ? [
+        {
+          dispositions: ['one-descendant-commit', 'deferred'],
+          baseline: atHead,
+          after: single,
+          physicalReceipt: {
+            classification: 'one-descendant-commit',
+            baseline: atHead,
+            after: single,
+            commitOid: STEP_SINGLE_COMMIT,
+          },
+          guard: 'committed',
+          finalText: 'Committed the change.',
+        },
+      ]
+    : [
     {
       dispositions: ['one-descendant-commit', 'deferred'],
       baseline: base,
@@ -900,7 +931,7 @@ function stepCommitTestLedger(playbookId: string, runtimeSessionId: string) {
       guard: 'committed',
       finalText: 'Kept the earlier commit as it is.',
     },
-  ];
+      ];
   return assertPlaybookEffectLedger({
     schemaVersion: 1,
     revision: 1,
@@ -4010,11 +4041,19 @@ describe('createPlaybookCaptainShell lifecycle and telemetry (CAPTAIN-11/14)', (
     expect(context.replies).toHaveLength(1);
     const reply = context.replies[0]!;
     const statements = [
-      `The step made 2 new commits, oldest first: ${STEP_FIRST_COMMIT}, ${STEP_LAST_COMMIT}.`,
-      `The step made no new commit; it named ${STEP_LAST_COMMIT}, already at HEAD, as its work.`,
+      `The step made 2 new commits on branch ${STEP_BRANCH}, oldest first: ${STEP_FIRST_COMMIT}, ${STEP_LAST_COMMIT}.`,
+      `The step made no new commit; it named ${STEP_LAST_COMMIT}, already at HEAD on branch ${STEP_BRANCH}, as its work.`,
     ];
-    expect(reply).toContain(statements.join('\n'));
-    expect(reply.split('already at HEAD')).toHaveLength(2);
+    // DR-090 §5: the reply's report marks each step, words staying with the
+    // facts; each names the branch (DR-090 §4).
+    expect(reply).toContain(
+      [
+        `✓ ${STEP_FIRST_COMMIT} · ${STEP_LAST_COMMIT} ⎇ ${STEP_BRANCH}`,
+        `✓ = ${STEP_LAST_COMMIT} ⎇ ${STEP_BRANCH}`,
+      ].join('\n'),
+    );
+    expect(reply.split('✓ =')).toHaveLength(2);
+    expect(reply).not.toContain('already at HEAD');
     // The closing-reply prompt reads the same statements as settlement facts.
     for (const statement of statements) {
       expect(
@@ -4022,6 +4061,48 @@ describe('createPlaybookCaptainShell lifecycle and telemetry (CAPTAIN-11/14)', (
       ).toBe(true);
     }
     expect(shell.exportSettlement()?.unresolvedEffects).toEqual([]);
+    await shell.dispose?.();
+  });
+
+  // DR-090 §4 (CAPTAIN-87): a step's one new commit reaches the closing
+  // reply's facts with its branch, and the reply carries no line for it.
+  it('gives the closing reply a one-commit step\'s hash and branch as a fact (DR-090)', async () => {
+    const rootSessionId = '21000000-0000-4000-8000-000000000049';
+    const settled = stepCommitTestLedger('code', rootSessionId, true);
+    let current = emptyPlaybookEffectLedger();
+    const registry = fakeCodeEntry(async (runtime) => {
+      current = settled;
+      runtime.snapshot = runtimeSnapshot(
+        'code',
+        playbookState('editing'),
+        { turn: 1, effectLedger: settled },
+      );
+      return quiescentResult('editing');
+    });
+    const capabilities: PlaybookHostConstructionCapabilities = {
+      ...fakeHostCapabilities(registry.entry, 'one-commit-lease'),
+      effectLedger: {
+        snapshot: vi.fn(() => current),
+        writeAhead: vi.fn(async () => current),
+      },
+    };
+    const shell = makeShell(registry, {
+      sessionIds: [rootSessionId],
+      hostCapabilities: { code: capabilities },
+    });
+
+    await shell.init!(stubSession().session);
+    const context = stubContext();
+    await shell.handleBossTurn(turn('/code commit once'), context.context);
+
+    const fact = `The step made one new commit, ${STEP_SINGLE_COMMIT}, on branch ${STEP_BRANCH}.`;
+    const closing = context.captainCalls.find(({ prompt }) =>
+      isClosingReplyPrompt(prompt),
+    );
+    expect(closing?.prompt.split('\n')).toContain(`- ${fact}`);
+    expect(context.replies).toHaveLength(1);
+    expect(context.replies[0]).not.toContain(STEP_SINGLE_COMMIT);
+    expect(context.replies[0]).not.toContain('✓');
     await shell.dispose?.();
   });
 
@@ -4222,6 +4303,8 @@ describe('createPlaybookCaptainShell lifecycle and telemetry (CAPTAIN-11/14)', (
         'Here is what happened:',
         '- Started /code with the selected request.',
         `- The commit ${CARRIED_COMMIT_OID} carries changes that were uncommitted before the step: absorbed as found boss.txt; altered before committing notes/draft.md.`,
+        // DR-090 §4: the step's one new commit is a fact the reply lists.
+        `- The step made one new commit, ${CARRIED_COMMIT_OID}.`,
         'Ask me where things stand and I will report the current state.',
       ].join('\n'),
     ]);
@@ -11914,7 +11997,7 @@ describe('Playbook Captain retained resumption (CAPTAIN-46/47/48)', () => {
         `- /review failed: the step's effect on the repository was not fully recorded; the repository stood at ${retainedObservation.head} before it.`,
       );
     }
-    expect(resumed.replies[0]).toMatch(/\n\nControls:\n- Stop \/code \(ready\)$/);
+    expect(resumed.replies[0]).toMatch(/\n\n▸ Stop \/code$/);
     expect(resumed.replies[0]).not.toContain('may duplicate external effects');
     expect(shell.exportSettlement()).toMatchObject({
       unresolvedEffects: Array.from(
@@ -14293,15 +14376,15 @@ describe('host-published runtime actions (CAPTAIN-60, CAPTAIN-7)', () => {
     );
 
     const reply = context.replies.at(-1)!;
-    const heads = `HEAD moved from ${UNRESOLVED_EFFECT_BASELINE_HEAD} to the proven commit ${COMMITTED_BEFORE_FAILURE_OID}.`;
+    const heads = `HEAD moved from ${UNRESOLVED_EFFECT_BASELINE_HEAD} to the proven commit ${COMMITTED_BEFORE_FAILURE_OID} on branch ${COMMITTED_BEFORE_FAILURE_BRANCH}.`;
     if (made === undefined) {
       // The unresolved entry already names the commits, so the report does
       // not state them again.
-      expect(reply).toContain('Failure: ');
+      expect(reply).toMatch(/^✕ /m);
       expect(reply).toContain(
         `the step made more than one commit; HEAD moved from ${UNRESOLVED_EFFECT_BASELINE_HEAD} to ${COMMITTED_BEFORE_FAILURE_OID}.`,
       );
-      expect(reply).not.toContain('Repository changes made before the failure:');
+      expect(reply).not.toContain(`✓ ${UNRESOLVED_EFFECT_BASELINE_HEAD} ⟶`);
       expect(shell.exportSettlement()?.unresolvedEffects).toEqual([
         {
           classification: 'multiple-commits',
@@ -14312,19 +14395,23 @@ describe('host-published runtime actions (CAPTAIN-60, CAPTAIN-7)', () => {
       await shell.dispose?.();
       return;
     }
-    const report = [
-      'Repository changes made before the failure:',
-      `- A step ${made}; ${heads}`,
-      'The failure does not undo these commits.',
-    ].join('\n');
+    // DR-090 §5: one marked line per receipt, before the failure line.
+    const report = `✓ ${UNRESOLVED_EFFECT_BASELINE_HEAD} ⟶ ${(commits ?? [COMMITTED_BEFORE_FAILURE_OID]).join(' · ')} ⎇ ${COMMITTED_BEFORE_FAILURE_BRANCH}`;
     expect(reply).toContain(report);
     expect(reply.split(report)).toHaveLength(2);
-    expect(reply.indexOf(report)).toBeLessThan(reply.indexOf('Failure: '));
-    // The closing-reply prompt reads the commits as a settlement fact.
+    expect(reply.indexOf(report)).toBeLessThan(reply.indexOf('✕ '));
+    expect(reply).not.toContain('Repository changes made before the failure');
+    // The closing-reply prompt reads the commits as a settlement fact, and
+    // the step's one-commit statement does not say them twice (DR-090 §4).
     const fact = `Before the failure, a step ${made}; ${heads}`;
     expect(
       context.captainCalls.some(({ prompt }) => prompt.includes(fact)),
     ).toBe(true);
+    expect(
+      context.captainCalls.some(({ prompt }) =>
+        prompt.includes('The step made one new commit'),
+      ),
+    ).toBe(false);
     // The commits are reported beside the failure, never as an unresolved effect.
     expect(shell.exportSettlement()?.unresolvedEffects).toEqual([]);
     await shell.dispose?.();
@@ -14357,16 +14444,18 @@ describe('host-published runtime actions (CAPTAIN-60, CAPTAIN-7)', () => {
     const started = stubContext();
     await shell.handleBossTurn(turn('/code first task'), started.context);
 
+    // DR-090 §5: the failure line and the controls carry marks and
+    // identifiers, no English sentence or standing word.
     const report = [
-      'Failure: the coder call failed: The coder is down.',
-      'Controls:',
-      '- Retry: run the failing step again (ready)',
-      '- Stop /code (ready)',
+      '✕ player-failed · coder',
+      '▸ Retry: run the failing step again',
+      '▸ Stop /code',
     ].join('\n');
     expect(started.replies.at(-1)).toContain(report);
+    expect(started.replies.at(-1)).not.toMatch(/Failure:|Controls:|\(ready\)/);
     // Appended once: the suffix carries one copy however often the turn
     // freezes its controller evidence.
-    expect(started.replies.at(-1)!.split('Failure: ')).toHaveLength(2);
+    expect(started.replies.at(-1)!.split('✕ ')).toHaveLength(2);
     // The closing-reply prompt sees the same failure as one settlement fact,
     // so a host without a phrase catalogue still gets the shell's sentence.
     expect(
@@ -14810,10 +14899,15 @@ describe('host-published runtime actions (CAPTAIN-60, CAPTAIN-7)', () => {
       const started = stubContext();
       await shell.handleBossTurn(turn('/code first task'), started.context);
 
-      // After a model-composed reply the `Failure:` line stays, once.
+      // After a model-composed reply the marked failure line stays, once,
+      // naming the cause by its code, before the controls (DR-090 §5); the
+      // words stay with the facts the closing reply reads.
       const reply = started.replies.at(-1)!;
-      expect(reply).toContain(`\n\nFailure: ${sentence}\nControls:\n`);
-      expect(reply.match(/^Failure: /gm)).toHaveLength(1);
+      expect(reply).toMatch(
+        new RegExp(`\\n\\n✕ ${cause.code}(?: · [^\\n]*)?\\n▸ `),
+      );
+      expect(reply.match(/^✕ /gm)).toHaveLength(1);
+      expect(reply).not.toContain(sentence);
       // The result-phase prompt reads the same failure as the leaf's fact.
       const closing = started.captainCalls.find((call) =>
         isClosingReplyPrompt(call.prompt),
@@ -15319,7 +15413,7 @@ describe('host-published runtime actions (CAPTAIN-60, CAPTAIN-7)', () => {
     // A parked leaf's controls stay whatever the statements said.
     if (!path.startsWith('a give-up') && !path.startsWith('a nested')) {
       expect(reply).toMatch(
-        /\n\nControls:\n- Retry: run the failing step again \(ready\)\n- Stop \/code \(ready\)$/,
+        /\n▸ Retry: run the failing step again\n▸ Stop \/code$/,
       );
     }
   });
@@ -15608,10 +15702,9 @@ describe('host-published runtime actions (CAPTAIN-60, CAPTAIN-7)', () => {
     }
   });
 
-  // CAPTAIN-69: after a model's reply the `Failure:` line passes the same
-  // guard the fallback's statements pass, so the two never disagree: a code
-  // span repeating a supplied id, and a phrased reason whose own words fail,
-  // each leave the line reading the step's failure with an internal error.
+  // CAPTAIN-69: after a model's reply the marked failure line names no
+  // recorded text, and a mark whose words fail CAPTAIN-9 reads its code
+  // alone (DR-090 §5).
   it.each([
     {
       row: 'a recorded reason repeating the supplied id',
@@ -15623,7 +15716,7 @@ describe('host-published runtime actions (CAPTAIN-60, CAPTAIN-7)', () => {
       cause: ADJUDICATOR_PATH_CAUSE,
       withheld: 'adjudicator',
     },
-  ])('says a `Failure:` line after a model reply as the fallback would: $row', async ({ cause, withheld }) => {
+  ])('says a marked failure line after a model reply without withheld words: $row', async ({ cause, withheld }) => {
     const code = advertising([RETRY]);
     const createRuntime = code.entry.createRuntime;
     code.entry.createRuntime = (options, hostCapabilities) => {
@@ -15640,9 +15733,8 @@ describe('host-published runtime actions (CAPTAIN-60, CAPTAIN-7)', () => {
     const started = stubContext();
     await shell.handleBossTurn(turn('/code first task'), started.context);
     const reply = started.replies.at(-1)!;
-    expect(reply).toContain(
-      '\n\nFailure: the step failed with an internal error.\nControls:\n',
-    );
+    // DR-090 §5: the marked line reads the cause's code alone.
+    expect(reply).toContain(`\n\n✕ ${cause.code}\n▸ `);
     expect(reply).not.toContain(withheld);
     await shell.dispose?.();
   });

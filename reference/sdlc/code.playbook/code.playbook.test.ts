@@ -431,10 +431,10 @@ describe('linked CODE runtime', () => {
       playerId: 'coder',
       resume: false,
     });
-    // DR-065: the prompt leads with its instructions; the relayed request
-    // follows the last instruction line.
+    // DR-065: the prompt leads with its instructions after the role line
+    // (DR-090 §3); the relayed request follows the last instruction line.
     expect(host.playerCalls[0]?.prompt).toMatch(
-      /^First determine whether the coding request starts a new coding intent/,
+      /^Role: coder · Model: GPT-5\.6 Sol\n\nFirst determine whether the coding request starts a new coding intent/,
     );
     expect(host.playerCalls[0]?.prompt).toContain(
       'Credit every AI that contributed to this commit: Coder GPT-5.6 Sol.\n\n' +
@@ -916,11 +916,11 @@ describe('linked CODE runtime', () => {
       'coder-2',
     ]);
     expect(host.playerCalls[1]?.prompt).toMatch(
-      /^Read the identified IR[\s\S]*Coder GPT-5\.6 Sol\.\n\n> Original request: Implement the large change\.\n> IR number: 040/,
+      /^Role: coder · Model: GPT-5\.6 Sol\n\nRead the identified IR[\s\S]*Coder GPT-5\.6 Sol\.\n\n> Original request: Implement the large change\.\n> IR number: 040/,
     );
     expect(host.playerCalls[2]?.prompt).not.toContain('Which compatibility boundary should I use?');
     expect(host.playerCalls[2]?.prompt).toContain(
-      'Boss reply:\nPreserve the narrow compatibility boundary.',
+      'Role: coder · Model: GPT-5.6 Sol\n\nBoss ⟶\nPreserve the narrow compatibility boundary.\n\n',
     );
     for (const prompt of [
       host.playerCalls[2]?.prompt,
@@ -929,8 +929,9 @@ describe('linked CODE runtime', () => {
       expect(prompt).toContain('> Original request: Implement the large change.');
       expect(prompt).toContain('> IR number: 040');
     }
+    // DR-090 §1: the later task's call hears the run's Boss exchange.
     expect(host.playerCalls[3]?.prompt).toMatch(
-      /^Read the identified IR[\s\S]*Coder GPT-5\.6 Sol\.\n\n> Original request: Implement the large change\.\n> IR number: 040/,
+      /^Role: coder · Model: GPT-5\.6 Sol\n\n\? ⟶\nWhich compatibility boundary should I use\?\n\nBoss ⟶\nPreserve the narrow compatibility boundary\.\n\nRead the identified IR[\s\S]*Coder GPT-5\.6 Sol\.\n\n> Original request: Implement the large change\.\n> IR number: 040/,
     );
     expect(host.childRequests.map(({ text }) => text)).toEqual([
       '> Original intent: Implement the large change.\n' +
@@ -1307,7 +1308,7 @@ describe('linked CODE runtime', () => {
     ]);
     expect(host.playerCalls[1]?.prompt).not.toContain('Which branch should I use?');
     expect(host.playerCalls[1]?.prompt).toContain(
-      'Boss reply:\nUse the narrow branch.',
+      'Boss ⟶\nUse the narrow branch.',
     );
     for (const prompt of [
       host.playerCalls[1]?.prompt,

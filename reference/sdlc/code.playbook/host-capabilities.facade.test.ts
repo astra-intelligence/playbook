@@ -210,10 +210,12 @@ describe('host-capabilities facade surface (playbook-cli-87, playbook-cli-89)', 
     });
     expect(Object.keys(observed.projection)).toEqual(['.gitignore', 'kept.txt']);
     expect(existsSync(join(plain, '.git'))).toBe(false);
-    // `git init` sees exactly the same content, so the two observations agree.
+    // `git init` sees exactly the same content, so the two observations agree
+    // but for the branch the new repository's HEAD names (DR-090 §4), which
+    // no comparison reads.
     execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: plain });
     const initialized = await facade.observeGitRepository(plain);
-    expect(initialized).toEqual(observed);
+    expect(initialized).toEqual({ ...observed, branch: 'main' });
     expect(
       (
         await facade.captureRepositoryReceipt(observed, {

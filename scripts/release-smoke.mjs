@@ -2397,12 +2397,11 @@ function stepEffectReconciliation(root, state) {
   const parkedReply = [
     unresolvedReply,
     '',
-    "Failure: the step's outcome could not be decided.",
-    'Controls:',
-    '- Retry unresolved effect reconciliation ' +
-      '(no-op: nothing has changed since it failed)',
-    '- Abandon unresolved workflow attempt (ready)',
-    '- Stop /effect (ready)',
+    // DR-090 §5: the failure report is marked, not worded.
+    '✕ judge-failed',
+    '▹ Retry unresolved effect reconciliation · no-op · receipt-complete',
+    '▸ Abandon unresolved workflow attempt',
+    '▸ Stop /effect',
   ].join('\n');
   const parkedEnvelope = parseExactHeadlessReply(
     parkedRun.stdout,

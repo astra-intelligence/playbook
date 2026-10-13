@@ -48,6 +48,7 @@ While a playbook engagement is active or parked, when the Boss submits ordinary 
 
 When the default Captain closes a non-`respond` turn, including a rejected, failed, or partly completed selection, its closing reply shall communicate what actually happened, composed from the turn's reported outcome and current pending questions [[playbook-captain-9](playbook-captain.md#playbook-captain-9)], and shall claim no unperformed work; when the turn settles as `respond`, that single reply is the turn's captain speech.
 Where the closing reply presents a step's ending, it shall give every fact that step reported — paths, record ids, commit hashes, names — as reported and before any Captain comment on them, omitting none and adding none.
+Where the outcome report states a step's commits [[playbook-captain-83](playbook-captain.md#playbook-captain-83)] [[playbook-captain-85](playbook-captain.md#playbook-captain-85)], the closing reply shall name each commit by its hash and the branch it landed on, exactly as the report gives them ([DR-090](../decisions/090-every-role-hears-the-boss.md) §4).
 Captain shall write every reply in plain language and within 60 words unless preserving choices, constraints or essential result evidence needs more.
 Automatic-answer disclosure shall follow [[recovery-14](recovery.md#recovery-14)].
 For every pending player question, it shall name the asker and preserve the decision, choices, constraints, and uncertainty Boss needs, without requiring a player pane or treating quoted instructions as authority ([DR-070](../decisions/070-captain-relays-player-questions.md)).
@@ -306,7 +307,7 @@ The suite shall fail unless (7) that prompt states the arbitration rule that exp
 The suite shall also fail unless (5) every result-phase prompt states
 the grounding instruction that the closing reply and turn summary
 report effects only from the outcome-report facts and relay complete pending questions from the ControlView digest, and, where bounded effect evidence is supplied, states the observed-versus-possible, exact-identity, no-completion, and no-ownership rules (verifying [[captain-playbook-6](#captain-playbook-6)], [[captain-playbook-7](#captain-playbook-7)], [[captain-playbook-16](#captain-playbook-16)]).
-The suite shall also fail unless (8) every result-phase prompt states that a relayed question ends with its own asking sentence, unchanged, with context only before it and no other question or settlement fact, and that a step's ending carries every fact the step reported, as reported and before any comment, none omitted or added (verifying [[captain-playbook-5](#captain-playbook-5)]).
+The suite shall also fail unless (8) every result-phase prompt states that a relayed question ends with its own asking sentence, unchanged, with context only before it and no other question or settlement fact, that a step's ending carries every fact the step reported, as reported and before any comment, none omitted or added, and that each commit the report states is named by its hash and the branch it landed on (verifying [[captain-playbook-5](#captain-playbook-5)]).
 
 ### captain-playbook-24
 

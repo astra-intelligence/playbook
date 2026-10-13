@@ -6017,17 +6017,13 @@ describe('a parked failure explains itself (DR-063)', () => {
 
     // The cause names the path the commit left behind, and every advertised
     // control says what running it would do.
+    // DR-090 §5: marked by the cause's code and identities.
+    expect(out.stdout).toMatch(/\n✕ commit-residual · [0-9a-f]{40} ⟶ [0-9a-f]{40} · stray\.txt\n/);
     expect(out.stdout).toContain(
-      "Failure: the step's commit left changes uncommitted: stray.txt.",
+      '▹ Retry unresolved effect reconciliation · no-op · receipt-complete',
     );
-    expect(out.stdout).toContain('Controls:');
-    expect(out.stdout).toContain(
-      '- Retry unresolved effect reconciliation (no-op: nothing has changed since it failed)',
-    );
-    expect(out.stdout).toContain(
-      '- Abandon unresolved workflow attempt (ready)',
-    );
-    expect(out.stdout).toContain('- Stop /code (ready)');
+    expect(out.stdout).toContain('▸ Abandon unresolved workflow attempt');
+    expect(out.stdout).toContain('▸ Stop /code');
   });
 });
 

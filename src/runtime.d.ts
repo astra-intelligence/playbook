@@ -236,6 +236,12 @@ export interface PlaybookRepositoryObservation {
     readonly worktree: string;
     readonly gitDir: string;
     readonly head: string;
+    /**
+     * The branch HEAD names, absent where HEAD is detached or the worktree is
+     * not a repository yet (DR-090 §4). Evidence for the Boss only: no
+     * comparison of two observations reads it.
+     */
+    readonly branch?: string;
     readonly projection: Readonly<Record<string, JsonValue>>;
     readonly projectionDigest: string;
 }
@@ -367,6 +373,11 @@ export interface PlaybookEffectLedgerCapability {
     snapshot(): PlaybookEffectLedger;
     writeAhead(commands: PlaybookEffectLedgerCommandBatch): Promise<PlaybookEffectLedger>;
 }
+/** One Boss exchange of a run: the question as asked and the reply verbatim (DR-090 §1). */
+export interface PlaybookBossExchange {
+    readonly question: string;
+    readonly reply: string;
+}
 export interface PlaybookRuntimeSnapshot {
     schemaVersion: 4;
     playbookId: string;
@@ -402,6 +413,8 @@ export interface PlaybookRuntimeSnapshot {
     /** Interrupted invocation, captured before its external call (DR-069). */
     recoveryCheckpoint?: PlaybookRecoveryCheckpoint;
     suspendedCall?: PlaybookSuspendedCall;
+    /** The run's Boss exchanges so far, in order; absent when there are none (DR-090 §1). */
+    bossExchanges?: readonly PlaybookBossExchange[];
 }
 export interface PlaybookRecoveryCheckpoint {
     readonly id?: string;

@@ -217,8 +217,8 @@ describe('optional link materialization integration', () => {
           assert.equal(resumed.outcome, 'terminal');
           assert.equal(resumed.state.stateId, 'done');
           assert.equal(calls, 2);
-          assert.ok(prompts[1].includes('Your previous question:\\n' + question));
-          assert.ok(prompts[1].includes('Boss reply:\\n' + answer));
+          assert.ok(prompts[1].includes('? ⟶\\n' + question));
+          assert.ok(prompts[1].includes('Boss ⟶\\n' + answer));
           assert.deepEqual(hostCapabilities.effectLedger.snapshot().boundaries.map(boundary => boundary.physicalReceipt.classification), ['unchanged', 'unchanged']);
         }
         assert.equal(git('rev-parse', 'HEAD'), head);
