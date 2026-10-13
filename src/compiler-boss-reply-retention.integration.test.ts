@@ -145,7 +145,12 @@ it.each(['Approve exactly this scope.\n', '  同意本范围。\r\n\r\nKeep $& a
     const f = await fixture();
     try {
       expect(await f.turn(answer)).toMatchObject({ outcome: 'terminal', state: { stateId: 'done' }, output: { approvalAnswer: answer, questionCleared: true, replyCleared: true } });
-      expect(f.prompts[2]).toBe('Use this complete approved answer:\n' + answer);
+      // DR-090 §1, §3: the role line and the run's exchange precede the
+      // Source's own retained answer, each verbatim.
+      expect(f.prompts[2]).toBe(
+        'Role: coordinator · Model: Fixture Coordinator\n\n? ⟶\n' + questionText +
+          '\n\nBoss ⟶\n' + answer + '\n\nUse this complete approved answer:\n' + answer,
+      );
       expect(f.capabilities.effectLedger.snapshot().boundaries.map(b => b.physicalReceipt?.classification)).toEqual(['unchanged', 'unchanged', 'unchanged']);
       expect(f.git('rev-parse', 'HEAD')).toBe(f.head); expect(f.git('status', '--porcelain')).toBe('');
     } finally { await f.dispose(); }

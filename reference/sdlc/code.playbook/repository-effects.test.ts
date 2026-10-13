@@ -341,6 +341,24 @@ describe('repository-relevant Git observations (PBRT-68)', () => {
     expect(Object.isFrozen(observation.projection)).toBe(true);
   });
 
+  // DR-090 §4: an observation names the branch HEAD names, and none at a
+  // detached HEAD; no classification reads it.
+  it('records the branch HEAD names and none at a detached HEAD', async () => {
+    const repo = await initRepository();
+    await git(repo, 'switch', '--quiet', '-c', 'feature/branch-evidence');
+    const onBranch = await observeGitRepository(repo);
+    expect(onBranch.branch).toBe('feature/branch-evidence');
+    await git(repo, 'switch', '--quiet', '--detach');
+    const detached = await observeGitRepository(repo);
+    expect(detached).not.toHaveProperty('branch');
+    expect(detached.head).toBe(onBranch.head);
+    const receipt = await captureRepositoryReceipt(onBranch, {
+      allowedDispositions: ['unchanged'],
+    });
+    expect(receipt.classification).toBe('unchanged');
+    expect(receipt.after).not.toHaveProperty('branch');
+  });
+
   it('projects index, tracked-worktree, mode, and nonignored-untracked layers but not ignored output', async () => {
     const repo = await initRepository();
     const clean = await observeGitRepository(repo);

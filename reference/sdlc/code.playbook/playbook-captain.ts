@@ -1414,6 +1414,31 @@ function boundedPathList(paths: readonly string[]): string {
     : printed.join(', ');
 }
 
+// DR-090 §5: the report lines the shell appends to a reply carry marks and
+// identifiers, never an English sentence, so a reply in any language reads
+// them as structure. The settlement facts a model reads keep their words.
+const MARK_DONE = '✓';
+const MARK_FAILED = '✕';
+const MARK_TO = '⟶';
+const MARK_BRANCH = '⎇';
+const MARK_SEP = '·';
+const MARK_READY = '▸';
+const MARK_NOT_READY = '▹';
+
+/** At most 24 items, then `+<n>` for the rest (DR-090 §5). */
+function markedList(items: readonly string[], separator = ', ', more = 0): string {
+  const printed = items.slice(0, CARRIED_CHANGE_PATH_LIMIT);
+  const omitted = items.length - printed.length + more;
+  if (printed.length === 0) return omitted > 0 ? `+${omitted}` : '';
+  return omitted > 0
+    ? `${printed.join(separator)}${separator}+${omitted}`
+    : printed.join(separator);
+}
+
+function markedBranch(branch: string | undefined): string {
+  return branch === undefined ? '' : ` ${MARK_BRANCH} ${branch}`;
+}
+
 /**
  * The carried pre-existing changes of the boundaries completed after
  * `boundaryPrefixCount`, one entry per commit OID in boundary sequence order.
@@ -1499,6 +1524,14 @@ interface CommitBeforeFailure {
   readonly commitOid: string;
   /** Every new commit, oldest first, where the step made more than one (DR-088). */
   readonly commits?: readonly string[];
+  /** The branch the commits landed on, where the receipt names one (DR-090 §4). */
+  readonly branch?: string;
+}
+
+/** DR-090 §4: where a step's commits landed, as its receipt names it. */
+function onBranch(receipt: PlaybookRepositoryReceipt): string {
+  const branch = receipt.after?.branch;
+  return branch === undefined ? '' : ` on branch ${branch}`;
 }
 
 function commitsBeforeFailure(
@@ -1534,6 +1567,9 @@ function commitsBeforeFailure(
       baselineHead: receipt.baseline.head,
       commitOid: receipt.commitOid,
       ...(receipt.commits === undefined ? {} : { commits: receipt.commits }),
+      ...(receipt.after?.branch === undefined
+        ? {}
+        : { branch: receipt.after.branch }),
     });
   }
   return commits;
@@ -1544,29 +1580,35 @@ function commitBeforeFailureClause({
   baselineHead,
   commitOid,
   commits,
+  branch,
 }: CommitBeforeFailure): string {
   const made =
     commits === undefined
       ? 'made one new commit'
       : `made ${commits.length} new commits, oldest first: ${boundedPathList(commits)}`;
-  return `${made}; HEAD moved from ${baselineHead} to the proven commit ${commitOid}.`;
+  const landed = branch === undefined ? '' : ` on branch ${branch}`;
+  return `${made}; HEAD moved from ${baselineHead} to the proven commit ${commitOid}${landed}.`;
 }
 
 function commitBeforeFailureFact(commit: CommitBeforeFailure): string {
   return `Before the failure, a step ${commitBeforeFailureClause(commit)}`;
 }
 
+// DR-090 §5: one marked line per receipt, `✓ <baselineHead> ⟶ <commits>`
+// and the branch they landed on.
 function commitsBeforeFailureReport(
   commits: readonly CommitBeforeFailure[],
 ): string | undefined {
   if (commits.length === 0) return undefined;
-  return [
-    'Repository changes made before the failure:',
-    ...commits.map(
-      (commit) => `- A step ${commitBeforeFailureClause(commit)}`,
-    ),
-    'The failure does not undo these commits.',
-  ].join('\n');
+  return commits
+    .map(
+      ({ baselineHead, commitOid, commits: listed, branch }) =>
+        `${MARK_DONE} ${baselineHead} ${MARK_TO} ${markedList(
+          listed ?? [commitOid],
+          ` ${MARK_SEP} `,
+        )}${markedBranch(branch)}`,
+    )
+    .join('\n');
 }
 
 /**
@@ -1583,19 +1625,29 @@ function finalTextNamesCommit(finalText: string, oid: string): boolean {
   return false;
 }
 
+/** One step's commit statement and the reply's marked line for it (DR-088 §3, DR-090 §4, §5). */
+interface StepCommitStatement {
+  readonly text: string;
+  /** The marked line appended to the presented reply, where one is. */
+  readonly shown?: string;
+}
+
 /**
- * DR-088 §3: what the steps completed after `boundaryPrefixCount` committed,
- * one statement each, in boundary sequence order: every new commit where a
- * receipt proves more than one, and the commit already at HEAD where a step
- * whose outcomes all commit or ask named it over an `unchanged` receipt. A
- * step in a deferred chain reads the chain's cumulative receipt at its last
- * boundary.
+ * DR-088 §3, DR-090 §4: what the steps completed after `boundaryPrefixCount`
+ * committed, one statement each, in boundary sequence order, naming the
+ * branch where the receipt names one: every new commit where a receipt
+ * proves more than one, the commit already at HEAD where a step whose
+ * outcomes all commit or ask named it over an `unchanged` receipt, and —
+ * as a fact for the closing reply only, and only where `oneCommit` asks —
+ * the one new commit of a step that made one. A step in a deferred chain
+ * reads the chain's cumulative receipt at its last boundary.
  */
 function stepCommitStatements(
   ledger: PlaybookEffectLedger,
   boundaryPrefixCount: number,
-): readonly string[] {
-  const statements: string[] = [];
+  oneCommit = true,
+): readonly StepCommitStatement[] {
+  const statements: StepCommitStatement[] = [];
   for (const boundary of ledger.boundaries) {
     if (boundary.sequence <= boundaryPrefixCount) continue;
     let receipt = boundary.physicalReceipt;
@@ -1611,9 +1663,23 @@ function stepCommitStatements(
       receipt.classification === 'one-descendant-commit' &&
       receipt.commits !== undefined
     ) {
-      statements.push(
-        `The step made ${receipt.commits.length} new commits, oldest first: ${boundedPathList(receipt.commits)}.`,
-      );
+      statements.push({
+        text: `The step made ${receipt.commits.length} new commits${onBranch(receipt)}, oldest first: ${boundedPathList(receipt.commits)}.`,
+        shown: `${MARK_DONE} ${markedList(receipt.commits, ` ${MARK_SEP} `)}${markedBranch(receipt.after?.branch)}`,
+      });
+      continue;
+    }
+    if (
+      receipt.classification === 'one-descendant-commit' &&
+      receipt.commitOid !== undefined
+    ) {
+      if (oneCommit) {
+        statements.push({
+          text: `The step made one new commit, ${receipt.commitOid}${
+            receipt.after?.branch === undefined ? '' : `,${onBranch(receipt)}`
+          }.`,
+        });
+      }
       continue;
     }
     const candidate = boundary.semanticCandidate;
@@ -1634,9 +1700,10 @@ function stepCommitStatements(
       guard !== BOSS_QUESTION_OUTCOME &&
       finalTextNamesCommit(boundary.finalText?.trim() ?? '', head)
     ) {
-      statements.push(
-        `The step made no new commit; it named ${head}, already at HEAD, as its work.`,
-      );
+      statements.push({
+        text: `The step made no new commit; it named ${head}, already at HEAD${onBranch(receipt)}, as its work.`,
+        shown: `${MARK_DONE} = ${head}${markedBranch(receipt.after?.branch)}`,
+      });
     }
   }
   return statements;
@@ -1647,16 +1714,6 @@ function stepCommitStatements(
 // of asking a model to describe facts it may drop. The report exposes no file
 // content, player prose, or internal identity: paths, revisions, dispositions,
 // and the reported error message are what a cause carries.
-
-/** The Boss-facing phrase for each closed control-action reason (DR-063 §3). */
-const CONTROL_REASON_PHRASES: Readonly<Record<string, string>> = {
-  'receipt-complete': 'nothing has changed since it failed',
-};
-
-function controlReasonPhrase(reason: string | undefined): string {
-  if (reason === undefined) return 'no reason was published';
-  return CONTROL_REASON_PHRASES[reason] ?? reason;
-}
 
 function causePathList(
   paths: readonly string[] | undefined,
@@ -2170,11 +2227,70 @@ function failureControlLine(action: {
   readonly standing?: PlaybookControlStanding;
   readonly reason?: string;
 }): string {
-  // DR-063 §3: an action that publishes no standing is `ready`.
+  // DR-063 §3: an action that publishes no standing is `ready`. DR-090 §5:
+  // the standing and its reason read as their closed identifiers.
   const standing = action.standing ?? 'ready';
   return standing === 'ready'
-    ? `- ${action.label} (ready)`
-    : `- ${action.label} (${standing}: ${controlReasonPhrase(action.reason)})`;
+    ? `${MARK_READY} ${action.label}`
+    : `${MARK_NOT_READY} ${action.label} ${MARK_SEP} ${standing}${
+        action.reason === undefined ? '' : ` ${MARK_SEP} ${action.reason}`
+      }`;
+}
+
+/**
+ * DR-090 §5: the failure line's marked record of a cause — its code and the
+ * identities its evidence carries, a nested cause after its playbook. No
+ * recorded reason or message reaches it: the settlement facts the closing
+ * reply reads state the failure in words (CAPTAIN-71).
+ */
+function markedFailure(
+  cause: PlaybookFailureCause,
+  describeNestedPlaybook: (playbookId: string) => string,
+): string {
+  const { evidence } = cause;
+  const parts: string[] = [cause.code];
+  if (evidence.roleId !== undefined) parts.push(evidence.roleId);
+  if (evidence.playbookId !== undefined) {
+    parts.push(describeNestedPlaybook(evidence.playbookId));
+  }
+  if (
+    cause.code === 'attribution-ambiguous' &&
+    evidence.required !== undefined &&
+    evidence.observed !== undefined
+  ) {
+    parts.push(`${evidence.required} ${MARK_TO} ${evidence.observed}`);
+  }
+  if (evidence.baselineHead !== undefined) {
+    parts.push(
+      evidence.afterHead === undefined
+        ? evidence.baselineHead
+        : `${evidence.baselineHead} ${MARK_TO} ${evidence.afterHead}`,
+    );
+  }
+  if (
+    evidence.commitOid !== undefined &&
+    evidence.commitOid !== evidence.afterHead
+  ) {
+    parts.push(evidence.commitOid);
+  }
+  const paths = evidence.paths;
+  if (paths !== undefined) {
+    const listed = markedList(
+      [
+        ...(paths.uncommitted ?? []),
+        ...(paths.altered ?? []),
+        ...(paths.lost ?? []),
+        ...(paths.changed ?? []),
+      ],
+      ', ',
+      paths.truncated ?? 0,
+    );
+    if (listed !== '') parts.push(listed);
+  }
+  if (evidence.cause !== undefined) {
+    parts.push(markedFailure(evidence.cause, describeNestedPlaybook));
+  }
+  return parts.join(` ${MARK_SEP} `);
 }
 
 /** A report appended to the visible reply (CAPTAIN-69). */
@@ -2192,7 +2308,11 @@ type PresentationReport =
   | { readonly kind: 'effects'; readonly lines: readonly string[] };
 
 interface FailureReport {
-  /** The `Failure:` line's sentence. */
+  /** The failure line's marked record (DR-090 §5). */
+  readonly mark: string;
+  /** The cause's code, the whole record where the mark's words fail CAPTAIN-9. */
+  readonly code: PlaybookFailureCode;
+  /** The failure statement in words, which the settlement facts carry. */
   readonly sentence: string;
   /** The reason the line states, which weighs it (CAPTAIN-69). */
   readonly reason: string;
@@ -2319,10 +2439,7 @@ function guardedStatement(
   };
   for (const reason of phrased) {
     if (!fails(reason)) continue;
-    guarded =
-      guarded === `Failure: ${reason}`
-        ? `Failure: the step failed with ${WITHHELD_REASON}.`
-        : guarded.split(`: ${reason}`).join(` with ${WITHHELD_REASON}.`);
+    guarded = guarded.split(`: ${reason}`).join(` with ${WITHHELD_REASON}.`);
   }
   for (const subject of shellWords.subjects) {
     if (guarded.startsWith(`${subject} `) && fails(subject)) {
@@ -2353,8 +2470,11 @@ function assembleStatements(
   guard: (text: string) => string = (text) => text,
 ): readonly (string | undefined)[] {
   const rendered = [...new Set(reasons)];
+  // DR-090 §5: the marked failure line is no sentence and gains no mark.
+  const finish = (kind: string, text: string): string =>
+    kind === 'failure' ? text.trim() : oneTerminalMark(text);
   const weighed = statements.map(({ text, kind = 'fact', reason }) => {
-    const statement = oneTerminalMark(text);
+    const statement = finish(kind, text);
     if (reason !== undefined) return { text: statement, kind, own: [reason] };
     const held = rendered.filter((candidate) =>
       alreadyStates(statement, candidate),
@@ -2378,7 +2498,7 @@ function assembleStatements(
   return weighed.map(({ text, kind, own }, index) =>
     stays[index] &&
     (kind !== 'failure' || !carried(own, [...entries, ...facts]))
-      ? oneTerminalMark(guard(text))
+      ? finish(kind, guard(text))
       : undefined,
   );
 }
@@ -2431,13 +2551,11 @@ function presentationSuffix(
   });
   const failure = turn.failureReport;
   if (failure !== undefined) {
-    parts.push(
-      [
-        ...(assembled.failure === undefined ? [] : [assembled.failure]),
-        'Controls:',
-        ...(failure.controls.length === 0 ? ['- none'] : failure.controls),
-      ].join('\n'),
-    );
+    const lines = [
+      ...(assembled.failure === undefined ? [] : [assembled.failure]),
+      ...failure.controls,
+    ];
+    if (lines.length > 0) parts.push(lines.join('\n'));
   }
   return parts.length === 0 ? undefined : parts.join('\n\n');
 }
@@ -4939,11 +5057,17 @@ export function createPlaybookCaptainShell(
   const reportCarriedPreExistingChanges = (turn: ActiveTurn): void => {
     if (turn.carriedEffectPrefix !== undefined) return;
     let carried: readonly CarriedPreExistingChanges[];
-    let commitStatements: readonly string[];
+    let commitStatements: readonly StepCommitStatement[];
     try {
       const ledger = assertPlaybookEffectLedger(currentEffectLedger());
       carried = carriedPreExistingChanges(ledger, presentedEffectPrefix);
-      commitStatements = stepCommitStatements(ledger, presentedEffectPrefix);
+      // DR-090 §4: a failed turn states its one-commit steps in the
+      // commits-before-failure report instead (DR-089 §3), never twice.
+      commitStatements = stepCommitStatements(
+        ledger,
+        presentedEffectPrefix,
+        !leafParkedInFailure(),
+      );
       turn.carriedEffectPrefix = ledger.boundaries.length;
     } catch {
       return;
@@ -4956,16 +5080,22 @@ export function createPlaybookCaptainShell(
         joinSettlementFact(turn, fact);
       }
     }
-    // DR-088 §3: the commits each step took, read from the same boundaries.
-    if (commitStatements.length > 0) {
+    // DR-088 §3, DR-090 §4: the commits each step took, read from the same
+    // boundaries; a step's one new commit reaches the closing reply's facts
+    // only.
+    const shownStatements = commitStatements.filter(
+      (statement): statement is StepCommitStatement & { readonly shown: string } =>
+        statement.shown !== undefined,
+    );
+    if (shownStatements.length > 0) {
       appendMandatoryPresentationSuffix(
         turn,
-        commitStatements.join('\n'),
-        commitStatements,
+        shownStatements.map(({ shown }) => shown).join('\n'),
+        shownStatements.map(({ text }) => text),
       );
-      for (const fact of commitStatements) {
-        joinSettlementFact(turn, fact);
-      }
+    }
+    for (const { text } of commitStatements) {
+      joinSettlementFact(turn, text);
     }
   };
 
@@ -8057,7 +8187,13 @@ export function createPlaybookCaptainShell(
           ? []
           : [
               {
-                text: `Failure: ${failure.sentence}`,
+                // CAPTAIN-69: a mark whose words CAPTAIN-9 refuses — a path
+                // naming control vocabulary, say — reads its code alone.
+                text: `${MARK_FAILED} ${
+                  replyRejection(failure.mark) === undefined
+                    ? failure.mark
+                    : failure.code
+                }`,
                 kind: 'failure' as const,
                 reason: failure.reason,
               },
@@ -9098,6 +9234,19 @@ export function createPlaybookCaptainShell(
   // DR-063 §4: appended once, beside the unresolved-effect and pre-existing
   // change reports, whenever the turn settles with the leaf parked in its
   // failure state or behind the retained-effect fence.
+  // The condition under which reportLeafFailure states a failure: the leaf
+  // parked in its failure state, or behind the retained-effect fence.
+  const leafParkedInFailure = (): boolean => {
+    if (retainedEffectReconciliation !== undefined) return true;
+    const leaf = leafFrame();
+    if (!leaf || typeof leaf.runtime.describe !== 'function') return false;
+    try {
+      return leaf.runtime.describe().state.stateId === 'failed';
+    } catch {
+      return false;
+    }
+  };
+
   const reportLeafFailure = (
     turn: ActiveTurn,
     unresolvedEffects: readonly PlaybookCaptainUnresolvedEffect[],
@@ -9138,6 +9287,8 @@ export function createPlaybookCaptainShell(
         : statement.restate(failure);
     const speak = statement?.speak ?? ((text: string) => text);
     turn.failureReport = {
+      mark: markedFailure(cause, describeNestedPlaybook),
+      code: cause.code,
       ...failureLine(
         noteReason(
           failureReason(failure, describeNestedPlaybook, speakableWords),

@@ -92,7 +92,7 @@ class Adapter {
       result = 'The task is complete.';
     }
     else if (prompt.includes('hidden-control judge')) result = JSON.stringify({ guard: asking ? 'needsBossReply' : 'done' });
-    else if (prompt === 'Later step') { await appendFile(join(dir, 'calls'), 'later\n'); if (oldStop) { if (scenario === 'cancelled-stop') host.host.abortActiveTurn('cancel step B'); throw new Error('step B stopped'); } result = 'Done.'; }
+    else if (prompt.replace(/^Role: [^\n]*\n\n/, '') === 'Later step') { await appendFile(join(dir, 'calls'), 'later\n'); if (oldStop) { if (scenario === 'cancelled-stop') host.host.abortActiveTurn('cancel step B'); throw new Error('step B stopped'); } result = 'Done.'; }
     else if (prompt.includes('work:')) {
       await appendFile(join(dir, 'calls'), 'player\n');
       if (scenario === 'player-before-change' && phase === 'start') kill();

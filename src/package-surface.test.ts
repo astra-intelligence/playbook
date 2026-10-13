@@ -1435,6 +1435,7 @@ describe('public CLI and registry surface (RELEASE-21)', () => {
       'JsonValue',
       'NormalizedError',
       'PlaybookAdoptionContext',
+      'PlaybookBossExchange',
       'PlaybookCallRequest',
       'PlaybookCallResult',
       'PlaybookCallStart',

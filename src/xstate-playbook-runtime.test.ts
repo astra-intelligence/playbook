@@ -1044,6 +1044,8 @@ describe('generic strategy defaults', () => {
       pendingBossQuestion: { question: 'Which color?' },
       bossReply: 'Blue.',
     });
+    // The composer's labelled contract, which slc's verifier pins; the
+    // runtime hands a composer no question and reply (DR-090 §2).
     expect(prompt).toBe(
       [
         'Continue the same task using Boss’s reply below.',
@@ -1760,7 +1762,7 @@ describe('player + script workflow over the shared factory', () => {
     expect(judgePrompts[0]).toContain('genuinely unanswered question');
     expect(judgePrompts[0]).toContain('A commit statement alone does not establish semantic completion');
     // Default composer substituted the machine-carried field.
-    expect(playerPrompts).toEqual(['Implement this task: build the widget']);
+    expect(playerPrompts).toEqual(['Role: coder\n\nImplement this task: build the widget']);
 
     expect(result.outcome).toBe('terminal');
     expect(result.state.stateId).toBe('done');
@@ -1919,12 +1921,16 @@ describe('player + script workflow over the shared factory', () => {
 
     const resumed = await runtime.handleBossInput(turn('use sqlite'));
     expect(resumed.outcome).toBe('terminal');
-    // The continuation preamble and exact Boss answer preceded the second
-    // player prompt.
-    expect(playerInputsSeen[1]).toContain(
-      'Your previous question:\nWhich database should I use?',
+    // The role line, then the marked question and exact Boss answer,
+    // preceded the second player prompt's body (DR-090 §2, §3).
+    expect(playerInputsSeen[1]).toBe(
+      [
+        'Role: coder',
+        '? ⟶\nWhich database should I use?',
+        'Boss ⟶\nuse sqlite',
+        'Implement this task: build storage',
+      ].join('\n\n'),
     );
-    expect(playerInputsSeen[1]).toContain('Boss reply:\nuse sqlite');
     await runtime.dispose();
   });
 
@@ -1965,7 +1971,7 @@ describe('player + script workflow over the shared factory', () => {
 
     const restarted = await runtime.handleBossInput(turn('new task'));
     expect(restarted.outcome).toBe('terminal');
-    expect(playerPrompts[1]).toBe('Implement this task: new task');
+    expect(playerPrompts[1]).toBe('Role: coder\n\nImplement this task: new task');
     await runtime.dispose();
   });
 
@@ -2001,7 +2007,7 @@ describe('player + script workflow over the shared factory', () => {
     // slc/link.md §Boss-event mapping: the derived BOSS_INTERRUPT contract
     // carries the runtime-owned `bossIntent` text field without the linker
     // supplying `bossEvents`, and the judge is never offered it.
-    expect(playerPrompts[1]).toBe('Implement this task: continue now');
+    expect(playerPrompts[1]).toBe('Role: coder\n\nImplement this task: continue now');
     expect(classifierPrompts[0]).not.toContain('"bossIntent"');
     await runtime.dispose();
   });
@@ -2044,7 +2050,7 @@ describe('player + script workflow over the shared factory', () => {
 
     const interrupted = await runtime.handleBossInput(turn('continue exactly'));
     expect(interrupted.outcome).toBe('terminal');
-    expect(playerPrompts[1]).toBe('Implement this task: continue exactly');
+    expect(playerPrompts[1]).toBe('Role: coder\n\nImplement this task: continue exactly');
     expect(classifierPrompts[0]).toContain('"targetId": "implement"');
     expect(classifierPrompts[0]).toContain('"mode": "resume"');
     expect(classifierPrompts[0]).not.toContain('"bossIntent"');
@@ -3253,8 +3259,10 @@ describe('direct-Captain actor over the shared factory', () => {
 
   it('preserves unique Captain call ids across parked snapshot restore', async () => {
     let captainCalls = 0;
+    const captainPrompts: string[] = [];
     const { ports, telemetry } = makeRecordingPorts({
-      callCaptain: async () => {
+      callCaptain: async (prompt) => {
+        captainPrompts.push(prompt);
         captainCalls += 1;
         return {
           status: 'ok',
@@ -3283,6 +3291,11 @@ describe('direct-Captain actor over the shared factory', () => {
     await restored.restore?.(session, snapshot!);
     const result = await restored.handleBossInput(turn('Tuesday'));
     expect(result.outcome).toBe('terminal');
+    // DR-090 §2 (PBRT-92): the runtime marks a direct-Captain continuation.
+    expect(captainPrompts[1]).toMatch(
+      /^\? ⟶\nWhich release day\?\n\nBoss ⟶\nTuesday\n\n/,
+    );
+    expect(captainPrompts[1]).not.toMatch(/Continue the same task|Your previous question|Boss reply:/);
     const callIds = telemetry
       .map(({ payload }) => payload as { type?: string; callId?: string })
       .filter((event) => event.type === 'captain.call.started')
@@ -3824,7 +3837,7 @@ describe('empty ok player result corrective re-ask (DR-028 / PBRT-51)', () => {
     expect(pair[1].payload).toMatchObject({
       status: 'error',
       error: { message: 'started sink offline' },
-      prompt: 'Implement this task: build the widget',
+      prompt: 'Role: coder\n\nImplement this task: build the widget',
       roleId: 'coder',
     });
     await runtime.dispose();
@@ -6623,8 +6636,13 @@ describe('parked-session snapshot over the shared factory', () => {
         roleId: 'coder',
         resume: expectedResume,
       });
+      // DR-090 §2, §3: the role line names the target binding's model and
+      // the runtime's marked continuation precedes the composer's own
+      // identity line.
       expect(playerCalls[0].prompt).toMatch(
-        new RegExp(`^\\[${targetPromptIdentity}\\]\\n`),
+        new RegExp(
+          `^Role: coder · Model: ${targetPromptIdentity}\\n\\n(?:\\? ⟶\\nWhich database should I use\\?\\n\\n)?Boss ⟶\\nuse sqlite\\n\\n\\[${targetPromptIdentity}\\]\\n`,
+        ),
       );
       expect(playerSessions.select).toHaveBeenCalledTimes(1);
       expect(playerSessions.select).toHaveBeenCalledWith('coder');
@@ -7538,8 +7556,8 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
     // payload: the second player prompt is byte-equal to the first, and no
     // judge call was a Boss-text classification.
     expect(playerPrompts).toEqual([
-      'Implement this task: build the widget',
-      'Implement this task: build the widget',
+      'Role: coder\n\nImplement this task: build the widget',
+      'Role: coder\n\nImplement this task: build the widget',
     ]);
     for (const prompt of judgePrompts.slice(judgeCallsBefore)) {
       expect(prompt).not.toContain('Classify the following Boss message');
@@ -8231,7 +8249,7 @@ describe('control surface over the shared factory (DR-029 / PBRT-52 / PBRT-53)',
       signal: sigOf(),
     });
     expect(receipt.disposition).toBe('executed');
-    expect(playerPrompts).toEqual(['Implement this task: <task>']);
+    expect(playerPrompts).toEqual(['Role: coder\n\nImplement this task: <task>']);
     // slc/link.md §Playbook trace: every apply finish adds the receipt
     // disposition and carries no start-only field. Assert over *every*
     // finish in the trace — the best-effort one the start-sink rejection
@@ -11137,7 +11155,7 @@ describe('parallel profile over the shared factory (DR-067)', () => {
     const { ports } = makeRecordingPorts({
       callPlayer: async (roleId, prompt) => {
         prompts.push(prompt);
-        if (prompt === 'Finish the selected proposal.' && ++followUpCalls === 1) {
+        if (prompt.endsWith('\n\nFinish the selected proposal.') && ++followUpCalls === 1) {
           return { status: 'error', error: 'Temporary connection failure' };
         }
         return { status: 'ok', finalText: `${roleId} proposal` };
@@ -11211,9 +11229,9 @@ describe('parallel profile over the shared factory (DR-067)', () => {
     });
     expect(host.cohortCalls).toHaveLength(2);
     expect(host.exclusiveCalls).toEqual([]);
-    expect(prompts.slice(2)).toEqual([
-      'Propose a design for Pick a queue design instead..',
-      'Propose a design for Pick a queue design instead..',
+    expect([...prompts.slice(2)].sort()).toEqual([
+      'Role: alpha\n\nPropose a design for Pick a queue design instead..',
+      'Role: beta\n\nPropose a design for Pick a queue design instead..',
     ]);
     await runtime.dispose();
   });
@@ -11391,5 +11409,343 @@ describe('DR-089 direct-Captain adjudication reply shapes', () => {
     });
     expect(runtime.describe?.().state.stateId).toBe('failed');
     await runtime.dispose();
+  });
+});
+
+// DR-090 / PBRT-104, PBRT-105, PBRT-106: an Analyst asks the Boss twice
+// before a Lead, whose Source retains nothing, reviews the plan. Every call
+// opens with its role and model; every call after a reply hears the run's
+// exchanges, marked rather than worded; the run keeps them across restore.
+describe('every role hears the Boss (DR-090)', () => {
+  const askResult = {
+    planned: 'The plan is complete.',
+    needsBossReply:
+      'The analyst asked Boss a question. Output shall include `question: <verbatim question>`.',
+  };
+  const exchangeMachine = createMachine({
+    id: 'exchange',
+    context: () => ({
+      task: undefined as string | undefined,
+      pendingBossQuestion: undefined as
+        | {
+            questionId: string;
+            resumeStateId: string;
+            sourceItem: string;
+            asker: { kind: 'role'; roleId: string };
+            question: string;
+          }
+        | undefined,
+      bossReply: undefined as string | undefined,
+      asked: 0,
+      lastError: undefined as unknown,
+    }),
+    initial: 'ready',
+    states: {
+      ready: {
+        meta: meta('ready'),
+        tags: ['playbook.parked'],
+        on: {
+          START: {
+            target: 'plan',
+            actions: assign({
+              task: ({ event }) => (event as { task: string }).task,
+            }),
+          },
+        },
+      },
+      plan: {
+        meta: roleMeta('plan', 'analyst'),
+        tags: ['playbook.busy'],
+        invoke: {
+          src: 'player',
+          input: ({ context }) => ({
+            stateId: 'plan',
+            role: 'analyst',
+            sourceItem: 'EX-1',
+            prompt: 'Plan: <task>',
+            task: context.task,
+            ...(context.pendingBossQuestion !== undefined &&
+            context.bossReply !== undefined
+              ? {
+                  pendingBossQuestion: context.pendingBossQuestion,
+                  bossReply: context.bossReply,
+                }
+              : {}),
+            result: askResult,
+          }),
+          onDone: [
+            {
+              guard: ({ event }) =>
+                (event.output as { guard: string }).guard === 'needsBossReply',
+              target: 'awaitBossReply',
+              actions: [
+                {
+                  type: 'playbook.acceptedOutcome',
+                  params: {
+                    source: 'plan',
+                    target: 'awaitBossReply',
+                    acceptedOutcome: 'needsBossReply',
+                  },
+                },
+                assign({
+                  asked: ({ context }) => context.asked + 1,
+                  bossReply: () => undefined,
+                  pendingBossQuestion: ({ context, event }) => ({
+                    questionId: `q-${context.asked + 1}`,
+                    resumeStateId: 'plan',
+                    sourceItem: 'EX-1',
+                    asker: { kind: 'role', roleId: 'analyst' },
+                    question: (event.output as { question: string }).question,
+                  }),
+                }),
+              ],
+            },
+            {
+              target: 'review',
+              actions: [
+                {
+                  type: 'playbook.acceptedOutcome',
+                  params: {
+                    source: 'plan',
+                    target: 'review',
+                    acceptedOutcome: 'planned',
+                  },
+                },
+                assign({
+                  pendingBossQuestion: () => undefined,
+                  bossReply: () => undefined,
+                }),
+              ],
+            },
+          ],
+          onError: {
+            target: 'failed',
+            actions: assign({ lastError: ({ event }) => event.error }),
+          },
+        },
+      },
+      awaitBossReply: {
+        meta: meta('awaitBossReply'),
+        tags: ['playbook.parked'],
+        on: {
+          BOSS_REPLY: {
+            target: 'plan',
+            actions: assign({
+              bossReply: ({ event }) => (event as { answer: string }).answer,
+            }),
+          },
+        },
+      },
+      review: {
+        meta: roleMeta('review', 'lead'),
+        tags: ['playbook.busy'],
+        invoke: {
+          src: 'player',
+          input: {
+            stateId: 'review',
+            role: 'lead',
+            sourceItem: 'EX-2',
+            prompt: 'Review the plan.',
+            result: { reviewed: 'The review is complete.' },
+          },
+          onDone: {
+            target: 'done',
+            actions: {
+              type: 'playbook.acceptedOutcome',
+              params: {
+                source: 'review',
+                target: 'done',
+                acceptedOutcome: 'reviewed',
+              },
+            },
+          },
+          onError: {
+            target: 'failed',
+            actions: assign({ lastError: ({ event }) => event.error }),
+          },
+        },
+      },
+      failed: {
+        meta: meta('failed'),
+        tags: ['playbook.parked'],
+        on: { START: 'plan' },
+      },
+      done: { meta: meta('done'), type: 'final' },
+    },
+  }, {
+    actions: { 'playbook.acceptedOutcome': () => undefined },
+  });
+  const createExchangeRuntime = createXStatePlaybookRuntime<
+    Record<string, never>,
+    object
+  >(exchangeMachine, {
+    label: 'exchange',
+    compat: { artifactSchema: 3, runtimeAbi: RUNTIME_ABI },
+    snapshotOptions: () => ({}),
+    entryEvent: { type: 'START', textField: 'task' },
+    roleStates: {
+      plan: { role: 'analyst', label: 'plan state' },
+      review: { role: 'lead', label: 'review state' },
+    },
+    verbatimPayloadFields: new Set(['question']),
+    outcomeAuthority: {
+      governedPlayerStates: {
+        plan: {
+          planned: { fields: {}, repositoryDisposition: 'unchanged' },
+          needsBossReply: {
+            fields: { question: 'presentation' },
+            repositoryDisposition: 'unchanged',
+          },
+        },
+        review: {
+          reviewed: { fields: {}, repositoryDisposition: 'unchanged' },
+        },
+      },
+    },
+  });
+  const Q1 = '第一轮：产品经理要哪个市场？';
+  const A1 = '  先做华东市场。\r\n只做企业客户。\n';
+  const Q2 = 'Which launch month?';
+  const A2 = 'March.';
+
+  it('opens every call with its role and model and relays the run\'s exchanges to every role', async () => {
+    const calls: { roleId: string; prompt: string }[] = [];
+    const finals = [Q1, Q2, 'The plan is ready.'];
+    const { ports } = makeRecordingPorts({
+      callPlayer: async (roleId, prompt) => {
+        calls.push({ roleId, prompt });
+        return {
+          status: 'ok',
+          finalText:
+            roleId === 'analyst' ? (finals.shift() ?? 'Another plan.') : 'Reviewed.',
+        };
+      },
+      callJudge: async (prompt) => {
+        if (prompt.includes('Classify the following Boss message')) {
+          return '{"type":"BOSS_REPLY"}';
+        }
+        const last = calls.at(-1)!;
+        if (last.roleId === 'lead') return '{"guard":"reviewed"}';
+        return calls.length <= 2
+          ? '{"guard":"needsBossReply"}'
+          : '{"guard":"planned"}';
+      },
+    });
+    const session: PlaybookSession = {
+      ...makeSession(ports),
+      roleBindings: {
+        analyst: { playerId: 'p.analyst', promptIdentity: 'gpt-6.1-sol' },
+        lead: { playerId: 'p.lead', promptIdentity: 'claude-opus-5' },
+      },
+    };
+    const first = createExchangeRuntime(
+      governedRuntimeConstruction({}, 'factory-test'),
+    );
+    await first.init(session);
+    await expect(first.handleBossInput(turn('the spring launch'))).resolves
+      .toMatchObject({ state: { stateId: 'awaitBossReply' } });
+    expect(calls[0]!.prompt).toBe(
+      'Role: analyst · Model: gpt-6.1-sol\n\nPlan: the spring launch',
+    );
+    expect(first.exportSnapshot!()).not.toHaveProperty('bossExchanges');
+
+    await expect(first.handleBossInput(turn(A1))).resolves.toMatchObject({
+      state: { stateId: 'awaitBossReply' },
+    });
+    // The asking role's continuation: its question and the reply verbatim,
+    // each after its marker line, no English framing (PBRT-92).
+    expect(calls[1]!.prompt).toBe(
+      [
+        'Role: analyst · Model: gpt-6.1-sol',
+        `? ⟶\n${Q1}`,
+        `Boss ⟶\n${A1}`,
+        'Plan: the spring launch',
+      ].join('\n\n'),
+    );
+    const parked = JSON.parse(
+      JSON.stringify(first.exportSnapshot!()),
+    ) as PlaybookRuntimeSnapshot;
+    expect(parked.bossExchanges).toEqual([{ question: Q1, reply: A1 }]);
+    await first.dispose();
+
+    // The run's exchanges survive a restore into a fresh runtime.
+    const restored = createExchangeRuntime(
+      governedRuntimeConstruction({}, 'factory-test', [], parked.effectLedger),
+    );
+    await restored.restore!(session, parked);
+    await expect(restored.handleBossInput(turn(A2))).resolves.toMatchObject({
+      outcome: 'terminal',
+    });
+    // The second continuation hears the first exchange before its own.
+    expect(calls[2]!.prompt).toBe(
+      [
+        'Role: analyst · Model: gpt-6.1-sol',
+        `? ⟶\n${Q1}`,
+        `Boss ⟶\n${A1}`,
+        `? ⟶\n${Q2}`,
+        `Boss ⟶\n${A2}`,
+        'Plan: the spring launch',
+      ].join('\n\n'),
+    );
+    // The Lead, whose Source retains nothing, hears both exchanges.
+    expect(calls[3]).toEqual({
+      roleId: 'lead',
+      prompt: [
+        'Role: lead · Model: claude-opus-5',
+        `? ⟶\n${Q1}`,
+        `Boss ⟶\n${A1}`,
+        `? ⟶\n${Q2}`,
+        `Boss ⟶\n${A2}`,
+        'Review the plan.',
+      ].join('\n\n'),
+    });
+    for (const { prompt } of calls) {
+      expect(prompt).not.toMatch(/Continue the same task|Your previous question|Boss reply:/);
+    }
+
+    // A new entry event begins a run that has heard nothing.
+    await restored.handleBossInput(turn('the autumn launch'));
+    expect(calls[4]!.prompt).toBe(
+      'Role: analyst · Model: gpt-6.1-sol\n\nPlan: the autumn launch',
+    );
+    await restored.dispose();
+  });
+
+  it('names the role alone without bindings and refuses a malformed exchange list', async () => {
+    const calls: string[] = [];
+    const { ports } = makeRecordingPorts({
+      callPlayer: async (_roleId, prompt) => {
+        calls.push(prompt);
+        return { status: 'ok', finalText: Q1 };
+      },
+      callJudge: async () => '{"guard":"needsBossReply"}',
+    });
+    const session = makeSession(ports);
+    const runtime = createExchangeRuntime(
+      governedRuntimeConstruction({}, 'factory-test'),
+    );
+    await runtime.init(session);
+    await runtime.handleBossInput(turn('the spring launch'));
+    expect(calls[0]).toBe('Role: analyst\n\nPlan: the spring launch');
+    const snapshot = JSON.parse(
+      JSON.stringify(runtime.exportSnapshot!()),
+    ) as PlaybookRuntimeSnapshot;
+    await runtime.dispose();
+
+    for (const bossExchanges of [
+      [],
+      [{ question: Q1, reply: '   ' }],
+      [{ question: Q1, reply: A1, asker: 'analyst' }],
+    ]) {
+      const restored = createExchangeRuntime(
+        governedRuntimeConstruction({}, 'factory-test', [], snapshot.effectLedger),
+      );
+      await expect(
+        restored.restore!(session, {
+          ...snapshot,
+          bossExchanges,
+        } as unknown as PlaybookRuntimeSnapshot),
+      ).rejects.toThrow(/bossExchanges/);
+    }
   });
 });

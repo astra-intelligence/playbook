@@ -590,6 +590,12 @@ export interface PlaybookRepositoryObservation {
   readonly worktree: string;
   readonly gitDir: string;
   readonly head: string;
+  /**
+   * The branch HEAD names, absent where HEAD is detached or the worktree is
+   * not a repository yet (DR-090 §4). Evidence for the Boss only: no
+   * comparison of two observations reads it.
+   */
+  readonly branch?: string;
   readonly projection: Readonly<Record<string, JsonValue>>;
   readonly projectionDigest: string;
 }
@@ -752,6 +758,12 @@ export interface PlaybookEffectLedgerCapability {
   ): Promise<PlaybookEffectLedger>;
 }
 
+/** One Boss exchange of a run: the question as asked and the reply verbatim (DR-090 §1). */
+export interface PlaybookBossExchange {
+  readonly question: string;
+  readonly reply: string;
+}
+
 // DR-014 §1 / DR-031 §5 / DR-032: JSON-safe capture of a parked or nested-call
 // suspended session. `machine` is the opaque XState persisted snapshot;
 // pending Boss questions and a suspended call are first-class so a
@@ -789,6 +801,8 @@ export interface PlaybookRuntimeSnapshot {
   /** Interrupted invocation, captured before its external call (DR-069). */
   recoveryCheckpoint?: PlaybookRecoveryCheckpoint;
   suspendedCall?: PlaybookSuspendedCall;
+  /** The run's Boss exchanges so far, in order; absent when there are none (DR-090 §1). */
+  bossExchanges?: readonly PlaybookBossExchange[];
 }
 
 export interface PlaybookRecoveryCheckpoint {

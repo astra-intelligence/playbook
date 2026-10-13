@@ -266,8 +266,10 @@ it.each([
             throw new Error('assessment network interruption');
           }
         } else {
-          players.push(prompt);
-          if (prompt.startsWith('flow work:')) {
+          // DR-090 §3: the player's body follows its role line.
+          const body = prompt.replace(/^Role: [^\n]*\n\n/, '');
+          players.push(body);
+          if (body.startsWith('flow work:')) {
             if (committed) {
               await writeFile(join(dir, 'commit.txt'), 'work');
               git('add', 'commit.txt');
@@ -277,7 +279,7 @@ it.each([
                 await writeFile(join(dir, 'stray'), 'generated');
               else throw new Error('missing local prerequisite');
             }
-          } else if (prompt === 'Finish parent') {
+          } else if (body === 'Finish parent') {
             if (!failedFinish) {
               failedFinish = true;
               throw new Error('parent needs recovery');

@@ -531,6 +531,10 @@ describe('captain.playbook acting turns (CAPPLAY-9, CAPPLAY-10, CAPPLAY-13)', ()
     expect(prompt).toContain(
       "When a step's ending is supplied, give every fact that step reported — paths, record ids, commit hashes, names — as it gave them, before anything you say about them; leave none out and add none.",
     );
+    // DR-090 §4: each commit the report states is named with its branch.
+    expect(prompt).toContain(
+      "Where the report states a step's commits, name each commit by its hash and the branch it landed on, exactly as the report gives them.",
+    );
     // No sentence of the prompt asks for the opposite.
     expect(prompt).not.toContain('state the actual decision Boss must make');
     expect(prompt).not.toContain('lead with who is asking');
@@ -2798,10 +2802,10 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
     ]);
     expect(target.harness.playerResumes[0]).toBe(false);
     expect(target.harness.playerPrompts[0]).toContain(
-      `Your previous question:\n${CODE_QUESTION}`,
+      `? ⟶\n${CODE_QUESTION}`,
     );
     expect(target.harness.playerPrompts[0]).toContain(
-      'Boss reply:\nUse the narrow release target.',
+      'Boss ⟶\nUse the narrow release target.',
     );
     expect(classifierPrompts(target.harness)).toHaveLength(1);
     expect(classifierPrompts(target.harness)[0]).toContain(
@@ -2851,11 +2855,8 @@ describe('IR-046 retained resumption on real linked artifacts', () => {
     // DR-063 §4: the adopted failure still explains itself in the Boss-visible
     // report, with the cause the source runtime decided and the controls list.
     const adoptedReport = target.harness.surfaced.at(-1) ?? '';
-    expect(adoptedReport).toContain(
-      'Failure: the coder call failed with the error `coder exploded`.',
-    );
-    expect(adoptedReport).toContain('Controls:');
-    expect(adoptedReport).toContain('- Stop /code (ready)');
+    expect(adoptedReport).toContain('✕ player-failed · coder');
+    expect(adoptedReport).toContain('▸ Stop /code');
     expect(adoptedReport).not.toMatch(/jump|firstPhase/);
 
     await target.harness.turn('Retry the retained failure now.', 2);
@@ -3706,7 +3707,7 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     expect(harness.closingPrompts()).toHaveLength(1);
     await harness.turn('Use preview with a seven-day limit.', 3);
     expect(harness.playerCalls).toHaveLength(calls + 1);
-    expect(harness.playerPrompts.at(-1)).toContain('Boss reply:\nUse preview with a seven-day limit.');
+    expect(harness.playerPrompts.at(-1)).toContain('Boss ⟶\nUse preview with a seven-day limit.');
     expect(harness.playerPrompts.at(-1)).toContain(question);
     await harness.shell.dispose?.();
   });
@@ -3804,13 +3805,12 @@ describe('CAPTAIN-37 observe–act–result loop', () => {
     const failureReport = [
       '',
       '',
-      'Failure: the coder call failed with the error `coder exploded`.',
-      'Controls:',
-      '- Retry: Coder runs the first coding phase: a direct ' +
-        'implementation, a new IR, or the next task of an existing IR. (ready)',
-      '- Resume from: Coder runs the first coding phase: a direct ' +
-        'implementation, a new IR, or the next task of an existing IR. (ready)',
-      '- Stop /code (ready)',
+      '✕ player-failed · coder',
+      '▸ Retry: Coder runs the first coding phase: a direct ' +
+        'implementation, a new IR, or the next task of an existing IR.',
+      '▸ Resume from: Coder runs the first coding phase: a direct ' +
+        'implementation, a new IR, or the next task of an existing IR.',
+      '▸ Stop /code',
     ].join('\n');
     expect(harness.surfaced.slice(-2)).toEqual([
       `The run failed with {"name":"Error","message":"coder exploded"}.${failureReport}`,
@@ -4646,13 +4646,12 @@ describe('CAPTAIN-38 validated actions and command table', () => {
       [
         'Only the advertised retry is available for this run.',
         '',
-        'Failure: the coder call failed with the error `coder exploded`.',
-        'Controls:',
-        '- Retry: Coder runs the first coding phase: a direct ' +
-          'implementation, a new IR, or the next task of an existing IR. (ready)',
-        '- Resume from: Coder runs the first coding phase: a direct ' +
-          'implementation, a new IR, or the next task of an existing IR. (ready)',
-        '- Stop /code (ready)',
+        '✕ player-failed · coder',
+        '▸ Retry: Coder runs the first coding phase: a direct ' +
+          'implementation, a new IR, or the next task of an existing IR.',
+        '▸ Resume from: Coder runs the first coding phase: a direct ' +
+          'implementation, a new IR, or the next task of an existing IR.',
+        '▸ Stop /code',
       ].join('\n'),
     );
     expect(JSON.stringify(runtime.describe!())).toBe(snapshotBefore);

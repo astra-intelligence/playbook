@@ -569,6 +569,9 @@ function pendingBossQuestionRecord(pending) {
 // Generic strategy defaults.
 // ---------------------------------------------------------------------------
 const CONTINUATION_PREAMBLE = 'Continue the same task using Boss’s reply below.';
+// The labelled continuation a compiled artifact's composer renders, which
+// slc's prompt-contract verifier pins. The runtime no longer sends it: it
+// hands a composer no question and reply, and marks them itself (DR-090 §2).
 function continuationBlocks(input, resuming = false) {
     if (input.pendingBossQuestion === undefined || input.bossReply === undefined) {
         return [];
@@ -578,6 +581,59 @@ function continuationBlocks(input, resuming = false) {
         ...(resuming ? [] : [`Your previous question:\n${input.pendingBossQuestion.question}`]),
         `Boss reply:\n${input.bossReply}`,
     ];
+}
+// DR-090 §2: a Boss exchange reaches a player as structure, not as an
+// English instruction — a marker line before each question and each reply,
+// whatever language the run speaks.
+const BOSS_QUESTION_MARKER = '? ⟶';
+const BOSS_REPLY_MARKER = 'Boss ⟶';
+function bossQuestionBlock(question) {
+    return `${BOSS_QUESTION_MARKER}\n${question}`;
+}
+function bossReplyBlock(reply) {
+    return `${BOSS_REPLY_MARKER}\n${reply}`;
+}
+/** DR-090 §2: the marked continuation of a call after a Boss reply. */
+function markedContinuationBlocks(input, resuming = false) {
+    if (input.pendingBossQuestion === undefined || input.bossReply === undefined) {
+        return [];
+    }
+    return [
+        ...(resuming ? [] : [bossQuestionBlock(input.pendingBossQuestion.question)]),
+        bossReplyBlock(input.bossReply),
+    ];
+}
+/**
+ * The input a composer receives: without the question and reply, which the
+ * runtime marks itself (DR-090 §2), so a composer adds no labelled blocks.
+ */
+function withoutContinuation(input) {
+    if (input.pendingBossQuestion === undefined && input.bossReply === undefined) {
+        return input;
+    }
+    const { pendingBossQuestion: _question, bossReply: _reply, ...rest } = input;
+    return rest;
+}
+/**
+ * DR-090 §1: the run's Boss exchanges a player call carries before its body,
+ * leaving out the one exchange the call's own continuation blocks carry, so
+ * the asking role reads its answered question once.
+ */
+function bossExchangeBlocks(exchanges, input) {
+    let carried = -1;
+    if (input.pendingBossQuestion !== undefined && input.bossReply !== undefined) {
+        const question = input.pendingBossQuestion.question;
+        for (let index = exchanges.length - 1; index >= 0; index -= 1) {
+            const exchange = exchanges[index];
+            if (exchange.question === question && exchange.reply === input.bossReply) {
+                carried = index;
+                break;
+            }
+        }
+    }
+    return exchanges.flatMap((exchange, index) => index === carried
+        ? []
+        : [bossQuestionBlock(exchange.question), bossReplyBlock(exchange.reply)]);
 }
 /** Add clarification context without repeating the question in a live conversation. */
 export function composePlayerContinuation(input, body, resuming = false) {
@@ -2716,8 +2772,13 @@ export function createXStatePlaybookRuntime(machine, spec) {
     }
     const composePlayerPrompt = spec.composePlayerPrompt ??
         ((input, _identity, resuming = false) => defaultComposePlayerPrompt(input, spec.placeholderFields, resuming));
-    const composeCaptainPrompt = spec.composeCaptainPrompt ??
+    const composeArtifactCaptainPrompt = spec.composeCaptainPrompt ??
         ((input) => defaultComposeCaptainPrompt(input, spec.placeholderFields));
+    // DR-090 §2: a direct-Captain continuation is marked by the runtime too.
+    const composeCaptainPrompt = (input) => [
+        ...markedContinuationBlocks(input),
+        composeArtifactCaptainPrompt(withoutContinuation(input)),
+    ].join('\n\n');
     const extractFields = spec.extractRequiredFields ?? defaultExtractRequiredFields;
     const verbatimPayloadFields = new Set(spec.verbatimPayloadFields ?? NO_VERBATIM_FIELDS);
     const adjudication = {
@@ -2866,6 +2927,9 @@ export function createXStatePlaybookRuntime(machine, spec) {
         const currentEffectLedger = () => assertPlaybookEffectLedger(effectLedgerCapability.snapshot(), `${label} current host effect ledger`);
         let effectLedgerMirror = currentEffectLedger();
         let recoveryCheckpoint;
+        // DR-090 §1: the run's Boss exchanges, in order. A run begins at the
+        // artifact's entry event; the list travels in the snapshot.
+        let bossExchanges = [];
         let retainedEffectSourceSessionId;
         let retainedEffectReconciliation;
         let retainedEffectReconciliationRequired = false;
@@ -3496,7 +3560,17 @@ export function createXStatePlaybookRuntime(machine, spec) {
             }
             return session?.roleBindings?.[roleId]?.promptIdentity ?? roleId;
         }
+        // DR-090 §3: the first block names the role and, where the host bound
+        // it, the model the call runs on as configured, so a player can name
+        // both where its project asks (a commit trailer, say).
+        function playerIdentityBlock(roleId) {
+            const binding = session?.roleBindings?.[roleId];
+            return binding === undefined
+                ? `Role: ${roleId}`
+                : `Role: ${roleId} · Model: ${binding.promptIdentity}`;
+        }
         function composeBoundPlayerPrompt(input, resuming = false) {
+            const roleId = requireRoleId(input);
             let active = true;
             const lookup = (roleId) => {
                 if (!active) {
@@ -3504,11 +3578,43 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 }
                 return promptIdentity(roleId);
             };
+            let body;
             try {
-                return composePlayerPrompt(input, lookup, resuming);
+                body = composePlayerPrompt(withoutContinuation(input), lookup, resuming);
             }
             finally {
                 active = false;
+            }
+            // DR-090 §1, §2: every role hears the Boss — the run's exchanges come
+            // before the body whatever the role, and the asking role's marked
+            // continuation carries the exchange it asked.
+            return [
+                playerIdentityBlock(roleId),
+                ...bossExchangeBlocks(bossExchanges, input),
+                ...markedContinuationBlocks(input, resuming),
+                body,
+            ].join('\n\n');
+        }
+        /** DR-090 §1: record a Boss reply the machine is about to receive. */
+        function recordBossExchange(event, pending) {
+            if (event.type !== 'BOSS_REPLY')
+                return;
+            const { questionId, answer } = event;
+            if (typeof answer !== 'string' || answer.trim().length === 0)
+                return;
+            const question = pending.find((candidate) => candidate.questionId === questionId) ??
+                (questionId === undefined && pending.length === 1 ? pending[0] : undefined);
+            if (question === undefined)
+                return;
+            bossExchanges = Object.freeze([
+                ...bossExchanges,
+                Object.freeze({ question: question.question, reply: answer }),
+            ]);
+        }
+        /** DR-090 §1: an entry event begins a new run, with no exchanges yet. */
+        function beginRunIfEntry(event) {
+            if (spec.entryEvent !== undefined && event.type === spec.entryEvent.type) {
+                bossExchanges = [];
             }
         }
         function continuationKey(roleId, playerId) {
@@ -4373,7 +4479,10 @@ export function createXStatePlaybookRuntime(machine, spec) {
             try {
                 await claim.assertOwner();
                 const restored = snapshotJsonValue(await repositoryCapability.observe());
-                if (!isDeepStrictEqual(restored, saved.baseline)) {
+                // DR-090 §4: the branch an observation names is never compared.
+                const { branch: _restoredBranch, ...restoredState } = restored;
+                const { branch: _savedBranch, ...savedState } = saved.baseline;
+                if (!isDeepStrictEqual(restoredState, savedState)) {
                     throw new Error(`${label} preparation has not restored the stopped step's repository; it remains paused`);
                 }
                 signal.throwIfAborted();
@@ -4581,6 +4690,14 @@ export function createXStatePlaybookRuntime(machine, spec) {
                 ...((state.stateId === 'failed' || pendingQuestions.length > 0) && recoveryCheckpoint !== undefined
                     ? { recoveryCheckpoint } : {}),
                 ...(suspendedCall === undefined ? {} : { suspendedCall }),
+                ...(bossExchanges.length === 0
+                    ? {}
+                    : {
+                        bossExchanges: bossExchanges.map(({ question, reply }) => ({
+                            question,
+                            reply,
+                        })),
+                    }),
             };
         }
         async function runJournalledStep(kind, input, signal, execute) {
@@ -6355,6 +6472,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
             deferInspectionEmissions = false;
             deferredInspectionEmissions = [];
             recoveryCheckpoint = undefined;
+            bossExchanges = [];
             suppressInspectionEmissions = false;
             initialized = false;
             traceSequence = 0;
@@ -6707,6 +6825,9 @@ export function createXStatePlaybookRuntime(machine, spec) {
                     }
                     restoreRoleResumeTokens(boundSnapshot.roleResumeTokens);
                 }
+                // DR-090 §1: a restored or adopted run keeps the Boss exchanges it
+                // heard; a snapshot without them heard none.
+                bossExchanges = Object.freeze((boundSnapshot.bossExchanges ?? []).map(({ question, reply }) => Object.freeze({ question, reply })));
                 nestedBridge.prepareRestore(suspendedCall);
                 if (suspendedCall !== undefined) {
                     playbookCallTurnIds.set(suspendedCall.callId, suspendedCall.turnId);
@@ -7672,7 +7793,14 @@ export function createXStatePlaybookRuntime(machine, spec) {
                             deferredOperation !== undefined) {
                             if (isExactDeferredBossReply(classifiedSnapshot, event, deferredPending)) {
                                 const statusLine = classificationStatus(event);
-                                const continuation = await continueBoundDeferredOperation(deferredOperation, event, signal, turnId, statusLine, onAccepted);
+                                const acceptedPending = deferredPending;
+                                const acceptedEvent = event;
+                                const continuation = await continueBoundDeferredOperation(deferredOperation, event, signal, turnId, statusLine, () => {
+                                    // DR-090 §1: the host started the continuation, so the
+                                    // machine receives this reply now.
+                                    recordBossExchange(acceptedEvent, [acceptedPending]);
+                                    onAccepted?.();
+                                });
                                 if (continuation === 'continued') {
                                     if (controlPlaneError !== undefined) {
                                         throw controlPlaneError;
@@ -7716,13 +7844,21 @@ export function createXStatePlaybookRuntime(machine, spec) {
                             signal.throwIfAborted();
                             // 3. A final actor cannot accept new events; reconstruct only
                             //    after classification produced a real event.
+                            const acceptedPending = classifiedSnapshot === undefined
+                                ? []
+                                : pendingBossQuestionsFor(normalizePlaybookSnapshot(classifiedSnapshot), (classifiedSnapshot.context ??
+                                    {}));
                             if (actor.getSnapshot().status === 'done') {
                                 stopActor();
                                 actor = buildActor(runtimePorts);
                                 // The replacement actor's snapshots are real state entries.
                                 suppressInspectionEmissions = false;
                                 actor.start();
+                                // DR-090 §1: a finished run's exchanges end with it.
+                                bossExchanges = [];
                             }
+                            beginRunIfEntry(event);
+                            recordBossExchange(event, acceptedPending);
                             onAccepted?.();
                             actor.send(event);
                             await waitForPlaybookQuiescence(actor, {
@@ -8003,6 +8139,7 @@ export function createXStatePlaybookRuntime(machine, spec) {
                         failedGovernedAttemptId = undefined;
                         controlPlaneError = undefined;
                         emissionFailure = undefined;
+                        bossExchanges = [];
                         retainedEffectSourceSessionId = undefined;
                         retainedEffectReconciliation = undefined;
                         retainedEffectReconciliationRequired = false;

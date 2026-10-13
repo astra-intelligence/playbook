@@ -379,6 +379,14 @@ describe('@sublang/playbook/runtime contract module (PBRT-34/35)', () => {
     ).toBe(
       normalizeType(interfaceBody(linkSpec, 'PlaybookRuntimeSnapshot')),
     );
+    // DR-090 §1: the run's Boss exchanges the snapshot carries.
+    expect(interfaceProperties(runtimeDts, 'PlaybookBossExchange')).toEqual([
+      'question:string',
+      'reply:string',
+    ]);
+    expect(interfaceProperties(runtimeDts, 'PlaybookBossExchange')).toEqual(
+      interfaceProperties(linkSpec, 'PlaybookBossExchange'),
+    );
     expect(interfaceProperties(runtimeDts, 'PlaybookCallRequest')).toEqual([
       'callId:string',
       'playbookId:string',
