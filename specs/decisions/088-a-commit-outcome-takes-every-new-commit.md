@@ -9,6 +9,7 @@ Accepted (2026-10-11).
 Amends [DR-040](040-outcome-authority-effect-reconciliation.md) in three scopes: §2's `one-descendant-commit` proof covers one or more new commits, §1 lets the reconciler read `finalText` for exactly one designation — whether it names the commit an `unchanged` receipt observed at HEAD — and §5's `unchanged` receipt for a claimed commit resolves under that designation.
 Amends [DR-062](062-pre-existing-changes-are-context.md) §2 in one scope: its accounting applies to the whole advance rather than to exactly one commit.
 The three dispositions, the exclusive claim, the cohort and exclusively-`unchanged` rules, the deferred chain, and the fail-closed treatment of rewritten, residual, foreign, lost, and unstable evidence stand.
+[DR-090](090-every-role-hears-the-boss.md) amends §3: each statement names the branch the commits landed on, and a step's one new commit joins the closing reply's facts.
 
 ## Context
 

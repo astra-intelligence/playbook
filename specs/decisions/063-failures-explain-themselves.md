@@ -10,6 +10,7 @@ Amends [DR-040](040-outcome-authority-effect-reconciliation.md) §4 in one scope
 Amends [DR-051](051-host-selected-runtime-recovery.md) and [DR-052](052-host-selected-give-up.md) in one scope: the `{ id, label }` pairs a host reads gain `standing` and its `reason`.
 Everything else of those records stands.
 §4 amended (2026-09-25): one renderer and one report assembly state each failure once, in Boss's words, by rules that hold by construction.
+[DR-090](090-every-role-hears-the-boss.md) amends §4: the appended failure line and control lines carry marks and identifiers, not sentences, while the renderer's words stay in the settlement facts.
 
 ## Context
 

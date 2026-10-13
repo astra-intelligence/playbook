@@ -12,6 +12,7 @@ Accepted.
 [DR-040](040-outcome-authority-effect-reconciliation.md) binds an effect-authorized question to one cumulative repository operation, permits only a checkpoint-identical authored continuation, and sends any other exit to unresolved reconciliation while leaving read-only question calls on their unchanged predicate.
 Compiler question-storage selection clarified by [DR-079](079-topology-selects-question-storage.md).
 Input-owned reply retention clarified by [DR-082](082-retain-input-owned-boss-replies.md).
+[DR-090](090-every-role-hears-the-boss.md) amends §2: the question and answer blocks carry the language-neutral markers `? ⟶` and `Boss ⟶`, and every later player call of the run carries the run's exchanges.
 
 ## Context
 
